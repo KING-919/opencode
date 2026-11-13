@@ -94,12 +94,19 @@ runtime.execute(source) // Effect<CodeMode.Result, never, ToolServices>
 ```
 
 The Effect environment is inferred from the supplied tools. `hooks` surround every call the program makes into the
-host: `tool.before`/`tool.after` receive `{ name, input, key }` with decoded input and the call's `<runId>:<callId>`
+host: `tool.before`/`tool.after` receive `{ name, input, key }` with the call's `<runId>:<callId>`
 idempotency key, and `extension.before`/`extension.after` receive `{ extension, name, args }`. An `after` hook also
 receives how the call ended (`success` with its value, `failure` with its error, or `interrupted`). A `before` hook
 runs before the call reaches the host, and a failing one denies it: the host function is never called, and the program
 catches the failure as a thrown error. A denied call fails the way the call itself would: a tool call or asynchronous
 global rejects its promise, and a synchronous global throws.
+
+A tool call counts toward `maxToolCalls` before any hook runs. `tool.before` then sees the name and input as the
+program wrote them, before lookup and validation, and may change either: renaming a misspelled or unknown path to a
+real tool, say, or repairing its input. A name it leaves unknown fails with the usual suggestions. Only a call to a
+plain tool (or an unknown path) can be renamed, and only to a plain tool, because a suspended run relaunches, waits on
+and cancels resumable calls by the path the program wrote; an idempotent call runs `tool.before` again on resume.
+`tool.after` sees the call as it ended, including a call that failed lookup or validation.
 
 ### Suspending and resuming a run
 
@@ -118,16 +125,16 @@ type Suspended = {
 const runtime = CodeMode.make({ tools })
 
 // inline
-const outcome = yield* runtime.program(code).run()
+const outcome = yield * runtime.program(code).run()
 
 // in the background, suspended from another fiber
 const program = runtime.program(code, undefined, { runId: "run-1" })
-const fiber = yield* Effect.forkChild(program.run())
-const suspended = yield* program.suspend() // the same Suspended that run() returns
-const outcome = yield* Fiber.join(fiber)
+const fiber = yield * Effect.forkChild(program.run())
+const suspended = yield * program.suspend() // the same Suspended that run() returns
+const outcome = yield * Fiber.join(fiber)
 
 // later, in this process or another one built from the same version
-yield* runtime.resume(CodeMode.toBytes(suspended.state)).run()
+yield * runtime.resume(CodeMode.toBytes(suspended.state)).run()
 ```
 
 A program runs once: running it again is a defect, so make another with `runtime.program` or
@@ -239,7 +246,11 @@ const web = Extension.make({
     ),
   },
 })
-const result = yield* CodeMode.make({ extensions: [web] }).execute(code).pipe(Effect.provideService(Session, session))
+const result =
+  yield *
+  CodeMode.make({ extensions: [web] })
+    .execute(code)
+    .pipe(Effect.provideService(Session, session))
 ```
 
 Every value crossing in either direction is converted, never shared: arguments come in as copies, results go out as

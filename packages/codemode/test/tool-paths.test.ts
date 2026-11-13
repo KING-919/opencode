@@ -77,6 +77,133 @@ describe("dotted tool names", () => {
   })
 })
 
+describe("tool.before", () => {
+  const issues = Tool.make({
+    description: "List issues",
+    input: Schema.Struct({ page: Schema.NumberFromString }),
+    output: Schema.Number,
+    execute: ({ page }) => Effect.succeed(page),
+  })
+
+  test("sees the input as written, before lookup and validation, and settles every admitted call", async () => {
+    const seen: Array<[string, unknown]> = []
+    const settled: Array<[string, unknown, string]> = []
+    const runtime = CodeMode.make({
+      tools: { "issues.list": issues },
+      hooks: {
+        "tool.before": (call) => Effect.sync(() => void seen.push([call.name, call.input])),
+        "tool.after": (call, result) => Effect.sync(() => void settled.push([call.name, call.input, result.status])),
+      },
+    })
+    expect(await failure(runtime, `await tools.issues.get_list({})`)).toMatchObject({
+      kind: "UnknownTool",
+      message: expect.stringContaining("Did you mean tools.issues.list?"),
+    })
+    expect(await failure(runtime, `await tools.issues.list({ page: 1 })`)).toMatchObject({ kind: "InvalidToolInput" })
+    expect(await value(runtime, `return await tools.issues.list({ page: "2" })`)).toBe(2)
+    expect(seen).toEqual([
+      ["issues.get_list", {}],
+      ["issues.list", { page: 1 }],
+      ["issues.list", { page: "2" }],
+    ])
+    expect(settled).toEqual([
+      ["issues.get_list", {}, "failure"],
+      ["issues.list", { page: 1 }, "failure"],
+      ["issues.list", { page: 2 }, "success"],
+    ])
+  })
+
+  test("can redirect a call, including an unknown path, and repair its input", async () => {
+    const settled: Array<[string, unknown]> = []
+    const runtime = CodeMode.make({
+      tools: { "issues.list": issues },
+      hooks: {
+        "tool.before": (call) =>
+          Effect.sync(() => {
+            if (call.name !== "issues.get_list") return
+            call.name = "issues.list"
+            call.input = { page: "3" }
+          }),
+        "tool.after": (call) => Effect.sync(() => void settled.push([call.name, call.input])),
+      },
+    })
+    expect(await value(runtime, `return await tools.issues.get_list({})`)).toBe(3)
+    expect(settled).toEqual([["issues.list", { page: 3 }]])
+  })
+
+  test("leaves the program's arguments as written when it edits the input in place", async () => {
+    const runtime = CodeMode.make({
+      tools: { "issues.list": issues },
+      hooks: {
+        "tool.before": (call) =>
+          Effect.sync(() => {
+            if (typeof call.input === "object" && call.input !== null) Object.assign(call.input, { page: "4" })
+          }),
+      },
+    })
+    expect(await value(runtime, `const input = { page: "1" }; await tools.issues.list(input); return input`)).toEqual({
+      page: "1",
+    })
+  })
+
+  test("a failure denies the call and rejects the script's promise", async () => {
+    const runtime = CodeMode.make({
+      tools: { "issues.list": issues },
+      hooks: { "tool.before": () => Effect.fail(new Error("policy denied this call")) },
+    })
+    expect(await value(runtime, `return tools.issues.list({ page: "1" }).catch(e => e.message)`)).toBe(
+      "policy denied this call",
+    )
+    expect(await failure(runtime, `await tools.missing()`)).toMatchObject({
+      kind: "ToolFailure",
+      message: "policy denied this call",
+    })
+  })
+
+  test("only redirects a plain call to a plain tool", async () => {
+    const read = Tool.make({
+      description: "Read",
+      input: Schema.Struct({}),
+      execute: Tool.idempotent(() => Effect.void),
+    })
+    const to = (target: string) =>
+      CodeMode.make({
+        tools: { read, plain: echo("Plain", "ok") },
+        hooks: { "tool.before": (call) => Effect.sync(() => void (call.name = target)) },
+      })
+    expect(await failure(to("read"), `await tools.missing()`)).toMatchObject({
+      kind: "InvalidToolInput",
+      message: "Cannot redirect 'missing' to 'read': only plain tool calls can be redirected.",
+    })
+    expect(await failure(to("plain"), `await tools.read()`)).toMatchObject({
+      kind: "InvalidToolInput",
+      message: "Cannot redirect 'read' to 'plain': only plain tool calls can be redirected.",
+    })
+  })
+
+  test("counts a call before the hook, so a call over the limit never reaches it", async () => {
+    const seen: string[] = []
+    const runtime = CodeMode.make({
+      tools: { available: echo("Available", "ok") },
+      limits: { maxToolCalls: 1 },
+      hooks: {
+        "tool.before": (call) =>
+          Effect.gen(function* () {
+            seen.push(call.name)
+            yield* Effect.yieldNow
+            call.name = "available"
+          }),
+      },
+    })
+    const result = await Effect.runPromise(
+      runtime.execute(`return await Promise.allSettled([tools.first(), tools.second()])`),
+    )
+    expect(seen).toEqual(["first"])
+    expect(result.toolCalls).toEqual([{ name: "first" }])
+    expect(result.ok && result.value).toMatchObject([{ status: "fulfilled", value: "ok" }, { status: "rejected" }])
+  })
+})
+
 describe("callable namespaces", () => {
   const runtime = CodeMode.make({
     tools: { issues: echo("All issues", "all"), "issues.list": echo("List issues", "list") },

@@ -34,10 +34,13 @@ export type ToolCall = {
   readonly name: string
 }
 
-/** A tool call the program is making, with its decoded input. */
+/**
+ * A tool call the program is making. `tool.before` sees the name and input the program used, before lookup and
+ * validation, and may change either to redirect or repair the call; `tool.after` sees what ran.
+ */
 export type ToolInvocation = {
-  readonly name: string
-  readonly input: unknown
+  name: string
+  input: unknown
   /** The call's idempotency key, `<runId>:<callId>`: the same at every hook, and across a suspended run's resumes. */
   readonly key: string
 }
@@ -57,6 +60,12 @@ export type CallResult =
   | { readonly status: "success"; readonly value: unknown }
   | { readonly status: "failure"; readonly error: unknown }
   | { readonly status: "interrupted" }
+
+function callResult(exit: Exit.Exit<unknown, unknown>): CallResult {
+  if (Exit.isSuccess(exit)) return { status: "success", value: exit.value }
+  if (Cause.hasInterruptsOnly(exit.cause)) return { status: "interrupted" }
+  return { status: "failure", error: Cause.squash(exit.cause) }
+}
 
 /** Hooks around every call the program makes into the host. A failing `before` denies the call. */
 export type Hooks<R = never> = {
@@ -81,9 +90,7 @@ export const hooked = <Call, A, R>(
       ? run
       : Effect.onExit(run, (exit) => {
           if (detaching?.()) return Effect.void
-          if (Exit.isSuccess(exit)) return after(call, { status: "success", value: exit.value })
-          if (Cause.hasInterruptsOnly(exit.cause)) return after(call, { status: "interrupted" })
-          return after(call, { status: "failure", error: Cause.squash(exit.cause) })
+          return after(call, callResult(exit))
         })
   return before === undefined ? observed : Effect.andThen(before(call), observed)
 }
@@ -647,22 +654,21 @@ export const make = <R>(
     calls.push(call)
   }
 
-  const decode = (name: string, tool: Tool<R>, args: Array<Json | undefined>) =>
-    Effect.gen(function* () {
-      const normalized = args.length === 0 ? [{}] : args
-      if (normalized.length !== 1)
-        throw new ToolRuntimeError("InvalidToolInput", `Tool '${name}' expects at most one input object.`)
-      const input = normalized[0]
-      const field = typeof input === "string" ? stringParameter(tool)?.name : undefined
-      return yield* Effect.try({
-        try: () => decodeToolInput(tool, field === undefined ? input : { [field]: input }),
-        catch: (cause) =>
-          new ToolRuntimeError(
-            "InvalidToolInput",
-            `Invalid input for tool '${name}': ${String(cause)}`,
-            name === "search" ? [] : ["The signature may have changed. Use search to get the current signature."],
-          ),
-      })
+  const argument = (args: Array<Json | undefined>) => (args.length === 0 ? {} : args[0])
+
+  // A freeform tool takes a bare string as its one string field.
+  const decode = (name: string, tool: Tool<R>, input: unknown) =>
+    Effect.try({
+      try: () => {
+        const field = typeof input === "string" ? stringParameter(tool)?.name : undefined
+        return decodeToolInput(tool, field === undefined ? input : { [field]: input })
+      },
+      catch: (cause) =>
+        new ToolRuntimeError(
+          "InvalidToolInput",
+          `Invalid input for tool '${name}': ${String(cause)}`,
+          name === "search" ? [] : ["The signature may have changed. Use search to get the current signature."],
+        ),
     })
 
   // A tool's own failure becomes a ToolError; interruption passes through.
@@ -690,26 +696,71 @@ export const make = <R>(
       catch: (cause) => new ToolRuntimeError("InvalidToolOutput", `Invalid output from tool '${name}': ${cause}`),
     })
 
-  const executeTool = (name: string, tool: Tool<R>, args: Array<Json | undefined>, options: ExecuteCallOptions) =>
+  const invoke = (tool: Tool<R>, call: ToolInvocation) =>
     Effect.gen(function* () {
       if ("_tag" in tool.execute && tool.execute._tag === "CodeModeDurable") {
-        throw new TypeError(`Tool '${name}' is a durable tool; start it with ToolRuntime.start.`)
+        throw new TypeError(`Tool '${call.name}' is a durable tool; start it with ToolRuntime.start.`)
       }
       const run = "_tag" in tool.execute ? tool.execute.execute : tool.execute
-      const key = options.key
-      const input = yield* decode(name, tool, args)
-      yield* Effect.sync(() => options.admit(name))
-      return yield* hooked(
-        { name, input, key },
-        hooks["tool.before"],
-        hooks["tool.after"],
-        Effect.gen(function* () {
-          const raw = yield* failure(Effect.suspend(() => run(input, { key })))
-          return yield* output(name, tool, raw)
-        }),
-        options.detaching,
-      )
+      const raw = yield* failure(Effect.suspend(() => run(call.input, { key: call.key })))
+      return yield* output(call.name, tool, raw)
     })
+
+  const mode = (tool: Tool<R> | undefined) => (tool && "_tag" in tool.execute ? tool.execute : undefined)
+
+  // A suspended run relaunches, waits on, or cancels a call by the path the program wrote, so only a plain call can
+  // move, and only to a plain tool.
+  const redirect = (from: string, requested: Tool<R> | undefined, to: string) => {
+    const tool = resolve(root, [to], prepared.searchIndex)
+    if (mode(requested) ?? mode(tool))
+      throw new ToolRuntimeError(
+        "InvalidToolInput",
+        `Cannot redirect '${from}' to '${to}': only plain tool calls can be redirected.`,
+      )
+    return tool
+  }
+
+  const attempt = <A>(
+    path: ReadonlyArray<string>,
+    args: Array<Json | undefined>,
+    options: ExecuteCallOptions,
+    run: (tool: Tool<R>, call: ToolInvocation) => Effect.Effect<A, unknown, R>,
+    search = false,
+  ) => {
+    const name = path.join(".")
+    const requested = search ? makeSearchTool(prepared.searchIndex) : lookup(root, path)?.tool
+    const execution = mode(requested)
+    return Effect.acquireUseRelease(
+      // Counted before any hook runs, so calls over the limit never reach the host.
+      Effect.sync((): ToolInvocation => {
+        options.admit(name)
+        // A copy: the saved request must stay as the program wrote it if a hook edits the input in place.
+        return { name, key: options.key, input: structuredClone(args.length > 1 ? args : argument(args)) }
+      }),
+      (call) =>
+        Effect.gen(function* () {
+          if (args.length > 1)
+            throw new ToolRuntimeError("InvalidToolInput", `Tool '${name}' expects at most one input object.`)
+          const before = hooks["tool.before"]
+          if (before) yield* failure(Effect.suspend(() => before(call)))
+          const tool =
+            call.name === name
+              ? (requested ?? resolve(root, path, prepared.searchIndex))
+              : redirect(name, requested, call.name)
+          call.input = yield* decode(call.name, tool, call.input)
+          return yield* run(tool, call)
+        }),
+      (call, exit) => {
+        if (options.detaching?.()) return Effect.void
+        // A durable start hands settlement to wait, including after resume.
+        if (execution?._tag === "CodeModeDurable" && Exit.isSuccess(exit)) {
+          if (hooks["tool.after"]) invocations.set(call.key, call)
+          return Effect.void
+        }
+        return hooks["tool.after"]?.(call, callResult(exit)) ?? Effect.void
+      },
+    )
+  }
 
   const durableTool = (
     path: ReadonlyArray<string>,
@@ -733,55 +784,31 @@ export const make = <R>(
     invocations,
     record: (name) => recordCall({ name }),
     keys: (path) => namespaceKeys(root, path),
-    search: (args, options) =>
-      Effect.suspend(() => executeTool("search", makeSearchTool(prepared.searchIndex), args, options)),
+    search: (args, options) => attempt(["search"], args, options, invoke, true),
     execute: (path, args, options) =>
       Effect.suspend(() => {
         const segments = canonicalSegments(path)
         // Models often write `tools.search(...)` for the bare `search(...)`; honor it unless a tool owns that path.
-        if (segments.length === 1 && segments[0] === "search" && lookup(root, segments) === undefined)
-          return executeTool("search", makeSearchTool(prepared.searchIndex), args, options)
-        return executeTool(segments.join("."), resolve(root, path, prepared.searchIndex), args, options)
+        const search = segments.length === 1 && segments[0] === "search" && lookup(root, segments) === undefined
+        return attempt(segments, args, options, invoke, search)
       }),
-    mode: (path) => {
-      const segments = canonicalSegments(path)
-      if (segments.length === 1 && segments[0] === "search" && lookup(root, segments) === undefined) return undefined
-      const execute = lookup(root, segments)?.tool?.execute
-      return execute !== undefined && "_tag" in execute ? execute : undefined
-    },
+    mode: (path) => mode(lookup(root, canonicalSegments(path))?.tool),
     start: (path, args, key, admit) =>
-      Effect.suspend(() => {
-        const found = durableTool(path)
-        return Effect.gen(function* () {
-          const input = yield* decode(found.name, found.tool, args)
-          yield* Effect.sync(() => admit(found.name))
-          const invocation: ToolInvocation = { name: found.name, input, key }
-          invocations.set(key, invocation)
-          const before = hooks["tool.before"]
-          const after = hooks["tool.after"]
-          const run = failure(Effect.suspend(() => found.durable.start(input, { key }))).pipe(
-            Effect.flatMap((raw) =>
-              Effect.try({
-                try: (): Json => {
-                  const text = JSON.stringify(raw)
-                  return text === undefined ? null : JSON.parse(text)
-                },
-                catch: (cause) =>
-                  new ToolRuntimeError("InvalidToolOutput", `Invalid start data from tool '${found.name}': ${cause}`),
-              }),
-            ),
-          )
-          const observed =
-            after === undefined
-              ? run
-              : Effect.onError(run, (cause) => {
-                  invocations.delete(key)
-                  if (Cause.hasInterruptsOnly(cause)) return after(invocation, { status: "interrupted" })
-                  return after(invocation, { status: "failure", error: Cause.squash(cause) })
-                })
-          return yield* before === undefined ? observed : Effect.andThen(before(invocation), observed)
-        })
-      }),
+      attempt(canonicalSegments(path), args, { key, admit }, (tool, call) =>
+        Effect.gen(function* () {
+          const durable = mode(tool)
+          if (durable?._tag !== "CodeModeDurable") throw new TypeError(`Tool '${call.name}' is not a durable tool.`)
+          const raw = yield* failure(Effect.suspend(() => durable.start(call.input, { key: call.key })))
+          return yield* Effect.try({
+            try: (): Json => {
+              const text = JSON.stringify(raw)
+              return text === undefined ? null : JSON.parse(text)
+            },
+            catch: (cause) =>
+              new ToolRuntimeError("InvalidToolOutput", `Invalid start data from tool '${call.name}': ${cause}`),
+          })
+        }),
+      ),
     wait: (path, args, key, data, detaching) =>
       Effect.suspend(() => {
         const found = durableTool(path)
@@ -797,7 +824,7 @@ export const make = <R>(
           known !== undefined
             ? Effect.succeed(known)
             : Effect.map(
-                decode(found.name, found.tool, args),
+                decode(found.name, found.tool, argument(args)),
                 (input): ToolInvocation => ({
                   name: found.name,
                   input,
@@ -808,9 +835,7 @@ export const make = <R>(
           Effect.onExit(run, (exit) => {
             if (detaching()) return Effect.void
             invocations.delete(key)
-            if (Exit.isSuccess(exit)) return after(call, { status: "success", value: exit.value })
-            if (Cause.hasInterruptsOnly(exit.cause)) return after(call, { status: "interrupted" })
-            return after(call, { status: "failure", error: Cause.squash(exit.cause) })
+            return after(call, callResult(exit))
           }),
         )
       }),
