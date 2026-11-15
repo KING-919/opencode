@@ -5,6 +5,9 @@ import { useTheme } from "../context/theme"
 import { tint } from "../theme/color"
 import { go, logo } from "../logo"
 
+// "Muhlis" is East Turkistan flag blue; "Code" follows the theme text color.
+const blue = RGBA.fromHex("#00A3E0")
+
 export function Logo() {
   const theme = useTheme()
   const dimensions = useTerminalDimensions()
@@ -53,12 +56,12 @@ export function Logo() {
     <box>
       {dimensions().height < 12 ? null : dimensions().width < 22 ? (
         <For each={go.right.slice(1)}>
-          {(line) => <box flexDirection="row">{renderLine(line, theme.text.base, true)}</box>}
+          {(line) => <box flexDirection="row">{renderLine(line, blue, true)}</box>}
         </For>
-      ) : dimensions().width < 44 ? (
+      ) : dimensions().width < 48 ? (
         <>
           <For each={logo.left.slice(1)}>
-            {(line) => <box flexDirection="row">{renderLine(line, theme.text.muted, false)}</box>}
+            {(line) => <box flexDirection="row">{renderLine(line, blue, false)}</box>}
           </For>
           <For each={logo.right}>
             {(line) => <box flexDirection="row">{renderLine(line, theme.text.base, true)}</box>}
@@ -68,7 +71,7 @@ export function Logo() {
         <For each={logo.left}>
           {(line, index) => (
             <box flexDirection="row" gap={1}>
-              <box flexDirection="row">{renderLine(line, theme.text.muted, false)}</box>
+              <box flexDirection="row">{renderLine(line, blue, false)}</box>
               <box flexDirection="row">{renderLine(logo.right[index()], theme.text.base, true)}</box>
             </box>
           )}

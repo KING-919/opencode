@@ -1,114 +1,230 @@
+<p align="center"><img src="docs/assets/muhliscode-logo.svg" alt="MuhlisCode" height="80"></p>
+<p align="center">ئوچۇق كودلۇق ئېيئاي (AI) پروگراممىلاش ياردەمچىسى.</p>
 <p align="center">
-  <a href="https://opencode.ai">
-    <picture>
-      <source srcset=".github/assets/logo-ornate-dark.svg" media="(prefers-color-scheme: dark)">
-      <source srcset=".github/assets/logo-ornate-light.svg" media="(prefers-color-scheme: light)">
-      <img src=".github/assets/logo-ornate-light.svg" alt="OpenCode logo">
-    </picture>
-  </a>
+  <a href="README.md">ئۇيغۇرچە</a> |
+  <a href="README.en.md">English</a>
 </p>
-<p align="center">The open source AI coding agent.</p>
-<p align="center">
-  <a href="https://opencode.ai/discord"><img alt="Discord" src="https://img.shields.io/discord/1391832426048651334?style=flat-square&label=discord" /></a>
-  <a href="https://www.npmjs.com/package/@opencode/cli"><img alt="npm" src="https://img.shields.io/npm/v/@opencode/cli?style=flat-square" /></a>
-  <a href="https://github.com/anomalyco/opencode/actions/workflows/release.yml"><img alt="Build status" src="https://img.shields.io/github/actions/workflow/status/anomalyco/opencode/release.yml?style=flat-square&branch=dev" /></a>
-</p>
-
-<p align="center">
-  <a href="README.md">English</a> |
-  <a href="README.zh.md">简体中文</a> |
-  <a href="README.zht.md">繁體中文</a> |
-  <a href="README.ko.md">한국어</a> |
-  <a href="README.de.md">Deutsch</a> |
-  <a href="README.es.md">Español</a> |
-  <a href="README.fr.md">Français</a> |
-  <a href="README.it.md">Italiano</a> |
-  <a href="README.da.md">Dansk</a> |
-  <a href="README.ja.md">日本語</a> |
-  <a href="README.pl.md">Polski</a> |
-  <a href="README.ru.md">Русский</a> |
-  <a href="README.bs.md">Bosanski</a> |
-  <a href="README.ar.md">العربية</a> |
-  <a href="README.no.md">Norsk</a> |
-  <a href="README.br.md">Português (Brasil)</a> |
-  <a href="README.th.md">ไทย</a> |
-  <a href="README.tr.md">Türkçe</a> |
-  <a href="README.uk.md">Українська</a> |
-  <a href="README.bn.md">বাংলা</a> |
-  <a href="README.gr.md">Ελληνικά</a> |
-  <a href="README.vi.md">Tiếng Việt</a>
-</p>
-
-[![OpenCode Terminal UI](services/site/public/v1/docs/assets/lander/screenshot.png)](https://opencode.ai)
 
 ---
 
-### Installation
+ئۇيغۇرچە تىل ئۇقتۇرۇشى: بۇ ھۆججەتتە ھەربىر قۇر ئۇيغۇرچە سۆز بىلەن باشلىنىدۇ، چۈنكى بەزى Markdown ئوقۇغۇچلار ئېنگلىزچە ھەرپ بىلەن باشلانغان قۇرنى سولدىن ئوڭغا تەڭشەپ قويۇپ، ئوقۇشنى قىيىنلاشتۇرىدۇ.
+
+## مۇخلىس كود MuhlisCode نېمە؟
+
+ئېيئاي MuhlisCode بولسا [OpenCode](https://github.com/anomalyco/opencode) نىڭ ئەڭ يېڭى نۇسخىسىدىن فورك قىلىنغان، ئۆزىمىزگە خاس ئېيئاي كود ياردەمچىسى.
+
+ئىككى تىل بۇ قورالنىڭ ئاساسىي نىشانى: ئېنگلىزچە ھەم ئۇيغۇرچە (لاتىن يېزىقى، ULY).
+
+## ئەڭ چوڭ ئالاھىدىلىكى: خىتاي مودېللىرىدىن ۋە باشقا خەتەرلەردىن تازىلانغان
+
+ئەڭ مۇھىم ئىش: MuhlisCode بولسا OpenCode ئاساسىدا ياسالغان، ئەمما ئۇنىڭدىكى بارلىق خىتاي مودېللىرى ۋە باشقا ئېھتىماللىق خەتەرلەر يوقىتىلىپ ياسالغان. بۇ بۇ قورالنىڭ ئەڭ چوڭ ئالاھىدىلىكى.
+
+ئەمەلىي ئىشلەنگەن ئىشلار:
+
+- خىتاي تەمىنلىگۈچىلىرىنىڭ مەنبە كودى `packages/ai` تىن ئۆچۈرۈلدى: Alibaba (Qwen)، MiniMax، Moonshot (Kimi)، DeepSeek، Zhipu / Z.ai، Volcengine ۋە BytePlus.
+- بىرلەشتۈرۈلگەن مودېل تىزىملىكىدىن (`snapshot.txt`) خىتاي شىركەتلىرىنىڭ 37 تەمىنلىگۈچىسى ئېلىۋېتىلدى.
+- [bin/muhliscode-policy.json](./bin/muhliscode-policy.json) ئارقىلىق يەنە شۇ تەمىنلىگۈچىلەر (Baidu، Tencent، Xiaomi، StepFun، SiliconFlow قاتارلىقلار ۋە `*-cn`) سىياسەت بىلەن چەكلەنگەن.
+- ئەسلى OpenCode نىڭ ئۆز مۇلازىمېتىرىدىكى «ھەقسىز تىزىملىك» (`opencode`) چەكلەنگەن. ئۇنىڭ ئىچىدە DeepSeek، GLM، MiniMax، Xiaomi MiMo ۋە LongCat مودېللىرى بار ئىدى.
+- ئاپتوماتىك يېڭىلاش تەكشۈرۈشى سۈكۈتتە تاقالغان، شۇڭا `opencode.ai` غا نۇسخا ئۇچۇرى يوللانمايدۇ.
+
+ئېنىق چەكلىمىلەر (مەخپىي تۇتماي ئېيتىمىز):
+
+- ئۇيغۇرچە: OpenRouter غا ئوخشاش ئارىلىق مۇلازىمەتلەر ئارقىلىق ئىشلىتىلگەن خىتاي مودېللىرى توسۇلمايدۇ، چۈنكى چەكلەش تەمىنلىگۈچى نامى بويىچە.
+- ئۇيغۇرچە: ھېچقانداق ئۈچىنچى تەرەپ MCP ياكى skill ئاپتوماتىك تەكشۈرۈلمەيدۇ. ئۇلارنى ئۆزىڭىز تەكشۈرۈشىڭىز كېرەك (تۆۋەندىكى بۆلەكلەرنى كۆرۈڭ).
+- ئۇيغۇرچە: `core/src/variant.ts` ۋە `packages/ai/README.md` دا ئۆچۈرۈلگەن تەمىنلىگۈچىلەرنىڭ كونا ئىزلىرى قالغان. ئۇلار ئىشلەتمەيدۇ، ئەمما تېخى تازىلانمىدى.
+- ئۇيغۇرچە: قاتتىق تەكشۈرۈشنىڭ تولۇق تىزىملىكى [security/SECURITY_POLICY.md](./security/SECURITY_POLICY.md) دا.
+
+## نېمە ئۈچۈن ياسالدى؟
+
+ئۇيغۇرچە سەۋەب: ھازىرقى ئېيئاي كود قوراللىرى ئۇيغۇرچىنى قوللىمايدۇ، ھەمدە كۆپىنچىسى ئىشلەتكۈچىنىڭ ئۇچۇرىنى ئۆز مۇلازىمېتىرىغا يوللايدۇ ياكى ئىشلىتىش ستاتىستىكىسى يىغىدۇ.
+
+- ئۇيغۇرچە: ئۇيغۇر ئىشلەتكۈچىلەر ئۈچۈن ئۆز تىلىدا ئىشلەيدىغان ئېيئاي كود قورالى بولۇش.
+- ئۇيغۇرچە: مەخپىيەتلىكنى ئاساس قىلىش، يەنى سۈكۈتتە سىرتقا ئۇچۇر يوللىماسلىق.
+- ئۇيغۇرچە: شەرقىي تۈركىستان ۋە ئۇيغۇرلارنىڭ ئاتالغۇ ۋە قىممەت قاراشلىرىغا ماس كېلىش.
+
+## ئالاھىدىلىكلىرى
+
+ئۇيغۇرچە ئەسكەرتىش: تۆۋەندىكى تىزىملىكتە «تامام» دېگىنى ھازىر ئىشلەيدۇ، «پىلان» دېگىنى تېخى ئىشلەنمىدى.
+
+- تامام: باش بەتتىكى لوگو «MuhlisCode» بولۇپ، شەرقىي تۈركىستان بايرىقىنىڭ كۆك رەڭگىدە كۆرۈنىدۇ.
+- تامام: ئاپتوماتىك يېڭىلاش تەكشۈرۈشى سۈكۈتتە تاقالغان، شۇڭا `opencode.ai` غا نۇسخا ئۇچۇرى يوللانمايدۇ. ئۇنى `MUHLISCODE_ENABLE_AUTOUPDATE=1` بىلەن قولدا ئاچقىلى بولىدۇ.
+- تامام: Claude Code ھېساباتىڭىز بىلەن ئىشلىتىش مۇمكىن (تۆۋەندىكى بۆلەكنى كۆرۈڭ).
+- پىلان: ئېنگلىزچە ھەم ئۇيغۇرچە (ULY) كۆرۈنمە يۈزى. ھازىر TUI ئېنگلىزچە، GUI نىڭ ئۇيغۇرچىسى تېخى قوشۇلمىدى.
+- پىلان: «opencode» نامىنى كۆرۈنۈشلۈك جايلاردا «MuhlisCode» غا ئالماشتۇرۇش.
+- تامام: خىتاي مودېللىرى ۋە ئەسلى OpenCode نىڭ ھەقسىز تىزىملىكى چەكلەنگەن (يۇقىرىدىكى بۆلەكنى كۆرۈڭ).
+- تامام: كومپيۇتېرىڭىزدىكى LM Studio مودېللىرىنى ئىشلىتىش مۇمكىن (تۆۋەندىكى بۆلەكنى كۆرۈڭ).
+- پىلان: `opencode.ai` غا ئۇلىنىدىغان قالغان چاقىرىشلارنى (مەسىلەن `models.opencode.ai`) تەكشۈرۈپ تاقاش.
+
+تەپسىلاتى: [docs/PLAN.md](./docs/PLAN.md) ۋە [security/audits/2026-11-15-telemetry.md](./security/audits/2026-11-15-telemetry.md).
+
+## ئورنىتىش ۋە ئىجرا قىلىش
+
+ئۇيغۇرچە ئەسكەرتىش: بۇ فورك تېخى ئاممىۋى قاچىلاش ئامبىرىغا (npm، brew) يوللانمىغان. ئۇنى مەنبەدىن ئىجرا قىلىڭ. [Bun](https://bun.sh) 1.4.4 كېرەك.
 
 ```bash
-# YOLO
-curl -fsSL https://opencode.ai/v2/install | bash
-
-# Package managers
-npm i -g @opencode/cli@latest      # or bun/pnpm/yarn
-brew install anomalyco/tap/opencode-v2 # macOS and Linux (recommended, always up to date)
-brew install opencode              # macOS and Linux (official brew formula, updated less)
-sudo pacman -S opencode            # Arch Linux (Stable)
-paru -S opencode-beta              # Arch Linux (Latest from AUR)
-mise use -g opencode               # Any OS
-nix run github:anomalyco/opencode  # Nix
+git clone <سىزنىڭ-فورك-ئادرېسىڭىز>
+cd muhliscode
+bun install
+bun run dev
 ```
 
-> [!TIP]
-> Remove versions older than 0.1.x before installing.
+ئۇيغۇرچە ئەسكەرتىش (Windows): `bun` بۇيرۇقى تونۇلمىسا، `%USERPROFILE%\.bun\bin` يولىنى PATH غا قوشۇپ، PowerShell نى قايتا ئېچىڭ.
 
-### Desktop App (BETA)
+ئۇيغۇرچە ئەسكەرتىش: ئاساسىي شاخچە (branch) نامى `dev`. PR لارنى `dev` غا ئاچىڭ.
 
-OpenCode is also available as a desktop application. Download it from [opencode.ai/download](https://opencode.ai/download).
+## Claude ھېساباتى بىلەن ئىشلىتىش (مىسال)
 
-| Platform              | Download                           |
-| --------------------- | ---------------------------------- |
-| macOS (Apple Silicon) | `opencode-desktop-mac-arm64.dmg`   |
-| macOS (Intel)         | `opencode-desktop-mac-x64.dmg`     |
-| Windows               | `opencode-desktop-win-x64.exe`     |
-| Linux                 | `.deb`, `.rpm`, or `.AppImage`     |
+ئۇيغۇرچە چۈشەندۈرۈش: MuhlisCode ئۆز ئالدىغا مودېل بەرمەيدۇ. ئۇ سىز ئۇلىغان مودېلنى ئىشلىتىدۇ. تۆۋەندە Claude Code ھېساباتىنى ئۇلاش مىسالى.
+
+1. ئۇيغۇرچە: ئاۋۋال Claude Code CLI نى ئورنىتىپ، تېرمىنالدا كىرىڭ:
 
 ```bash
-# macOS (Homebrew)
-brew install --cask opencode-desktop
+claude auth login
 ```
 
-#### Installation Directory
+2. ئۇيغۇرچە: `bun run dev` بىلەن MuhlisCode نى ئېچىڭ.
+3. ئۇيغۇرچە: ئىچىدە `/connect` نى يېزىپ، «Claude Agent» نى تاللاڭ.
+4. ئۇيغۇرچە: `/models` نى يېزىپ، ئىشلەتمەكچى بولغان Claude مودېلىنى تاللاڭ.
+5. ئۇيغۇرچە: ئەمدى ئادەتتىكىدەك سۇئال سوراپ باشلىسىڭىز بولىدۇ.
 
-The install script installs OpenCode to `$HOME/.opencode/bin`.
+ئۇيغۇرچە مۇھىم نۇقتىلار:
 
-### Agents
+- ئۇيغۇرچە: MuhlisCode سىزنىڭ كىرىش token ىڭىزنى كۆرمەيدۇ. كىرىشنى `claude` ئۆزى باشقۇرىدۇ.
+- ئۇيغۇرچە: ئەگەر «You've used today's free messages» دېگەن ئۇچۇر چىقسا، سىز ئەسلى OpenCode نىڭ ھەقسىز مودېلىنى ئىشلىتىۋاتىسىز. ئۇنى ئىشلەتمەي، يۇقىرىدىكى 3 ۋە 4-قەدەم بىلەن ئۆز ھېساباتىڭىزغا ئالماشتۇرۇڭ.
+- ئۇيغۇرچە: ھەقسىز مودېللارنى پۈتۈنلەي تاقاش ئۈچۈن `OPENCODE_DISABLE_FREE_MODELS=1` مۇھىت ئۆزگەرگۈچىسىنى بېكىتىڭ.
+- ئۇيغۇرچە: ئەگەر Anthropic نىڭ بىخەتەرلىك سۈزگۈچى ئۇچۇرىڭىزنى توسسا، يېڭى سۆھبەت ئېچىڭ ياكى باشقا مودېلنى سىناڭ.
 
-OpenCode includes two built-in agents you can switch between with the `Tab` key.
+ئەگەر ئىجرا قىلىنىۋاتقان `opencode` مۇلازىمېتىرى ۋە جانلىق سۆھبەتلەر بىلەن سىناش كېرەك بولسا (ئۇيغۇرچە ئەسكەرتىش: بۇ ئۈچۈن `sh` ۋە ئورنىتىلغان `opencode` كېرەك):
 
-- **build** - Default, full-access agent for development work
-- **plan** - Read-only agent for analysis and code exploration
-  - Denies file edits by default
-  - Asks permission before running bash commands
-  - Ideal for exploring unfamiliar codebases or planning changes
+```bash
+bun run dev:live
+```
 
-Also included is a **general** subagent for complex searches and multistep tasks.
-This is used internally and can be invoked using `@general` in messages.
+## «muhliscode» بۇيرۇقى بىلەن ئېچىش
 
-Learn more about [agents](https://opencode.ai/docs/agents).
+ئۇيغۇرچە چۈشەندۈرۈش: [bin/muhliscode.cmd](./bin/muhliscode.cmd) نى PATH غا قوشسىڭىز، ھەرقانداق مۇندەرىجىدە `muhliscode` دەپ يازساڭلا شۇ مۇندەرىجە ئېچىلىدۇ.
 
-### Documentation
+```powershell
+[Environment]::SetEnvironmentVariable("Path", $env:Path + ";<ئامبار-يولى>\bin", "User")
+```
 
-For more info on how to configure OpenCode, [**head over to our docs**](https://opencode.ai/docs).
+- ئۇيغۇرچە: قوزغاتقۇچ `--standalone` ئىشلىتىدۇ، يەنى ئورنىتىلغان ئەسلى `opencode` فون مۇلازىمىتىگە ئۇلانمايدۇ.
+- ئۇيغۇرچە: ئۇ ھەر قېتىم `bin/muhliscode-policy.json` نى (`OPENCODE_CONFIG` ئارقىلىق) يۈكلەپ، خىتاي تەمىنلىگۈچىلىرىنى چەكلەيدۇ.
 
-### Contributing
+## LM Studio دىكى يەرلىك مودېللارنى ئىشلىتىش
 
-If you're interested in contributing to OpenCode, please read our [contributing docs](./CONTRIBUTING.md) before submitting a pull request.
+ئۇيغۇرچە چۈشەندۈرۈش: كومپيۇتېرىڭىزدىكى LM Studio مودېللىرىنى MuhlisCode ئاپتوماتىك تونۇيدۇ. بۇ ئەڭ مەخپىيەتلىك ساقلايدىغان يول، چۈنكى ھېچقانداق سۆز كومپيۇتېرىڭىزدىن چىقمايدۇ.
 
-### Building on OpenCode
+1. ئۇيغۇرچە: LM Studio نى ئېچىپ، بىر مودېل چۈشۈرۈپ ۋە يۈكلەڭ (Load).
+2. ئۇيغۇرچە: LM Studio دا يەرلىك مۇلازىمېتىرنى قوزغىتىڭ (Developer بۆلىكى، «Start Server»). سۈكۈتتىكى ئادرېس `http://127.0.0.1:1234`.
+3. ئۇيغۇرچە: `muhliscode` نى ئېچىپ، `/models` نى يېزىڭ. مودېل `lmstudio/<مودېل-نامى>` دەپ كۆرۈنىدۇ. تىزىملىك ئاپتوماتىك يېڭىلىنىدۇ، كۆرۈنمىسە بىر ئاز كۈتۈڭ.
+4. ئۇيغۇرچە: ئۇنى تاللاپ ئادەتتىكىدەك ئىشلىتىڭ.
 
-If you are working on a project that's related to OpenCode and is using "opencode" as part of its name, for example "opencode-dashboard" or "opencode-mobile", please add a note to your README to clarify that it is not built by the OpenCode team and is not affiliated with us in any way.
+ئۇيغۇرچە ئەسكەرتىشلەر:
 
----
+- ئۇيغۇرچە: ئاگېنت ئىقتىدارى (ھۆججەت تەھرىرلەش، بۇيرۇق ئىجرا قىلىش) ئۈچۈن «tool use» نى قوللايدىغان مودېل تاللاڭ. ئاددىي مودېللار پەقەت سۆھبەت قىلالايدۇ.
+- ئۇيغۇرچە: بۇ ئىقتىدارنىڭ ئاپتوماتىك ئېنىقلىنىشىنى مەن ساختا LM Studio مۇلازىمېتىرى بىلەن سىناپ كۆردۈم: مودېل تىزىملىككە چىقتى. ھەقىقىي LM Studio ۋە ھەقىقىي مودېل بىلەن سۆھبەت قىلىپ سىنالمىدى.
+- ئۇيغۇرچە: خىتاي شىركەتلىرى چىقارغان مودېللارنى (Qwen، DeepSeek، GLM قاتارلىقلار) LM Studio دىن چۈشۈرسىڭىز، MuhlisCode ئۇلارنى توسمايدۇ، چۈنكى ئۇلار يەرلىك. بۇ ھەقتە ئۆزىڭىز قارار قىلىڭ.
+- ئۇيغۇرچە: Ollama (`http://127.0.0.1:11434`) مۇ ئوخشاش ئۇسۇلدا ئاپتوماتىك تونۇلىدۇ.
 
-**Join our community** [Discord](https://discord.gg/opencode) | [X.com](https://x.com/opencode)
+## Skill قاچىلاش
+
+ئۇيغۇرچە جاۋاب: شۇنداق، MuhlisCode گە skill قاچىلاشقا بولىدۇ. skill بولسا `SKILL.md` ھۆججىتى بار مۇندەرىجە.
+
+ئۇيغۇرچە ئورۇنلار (ھەر بىرىدە `<نام>/SKILL.md` بولۇشى كېرەك):
+
+- پروجېكت ئىچىدە: `.opencode/skills/`
+- ئومۇمىي: `%USERPROFILE%\.config\opencode\skills\` (ئورنىتىلغان ئەسلى `opencode` بىلەن ئورتاق)
+- Claude Code بىلەن ماسلاشتۇرۇلغان: `.claude/skills/` ۋە `.agents/skills/`
+- سەپلىمىدە `skills` تىزىملىكى ئارقىلىق (يول ياكى `https://` ئۇلانمىسى)
+
+ئۇيغۇرچە بىخەتەرلىك قائىدىسى: سىرتتىن كەلگەن skill ئىچىدە كود بولۇشى مۇمكىن، شۇڭا ئۇنى بىۋاسىتە ئورنىتىپ ئىشلەتمەڭ.
+
+1. ئۇيغۇرچە: ئاۋۋال `skills/_quarantine/` غا قويۇڭ.
+2. ئۇيغۇرچە: بارلىق ھۆججەتلىرىنى ئوقۇڭ (سىكرىپتلار، تايىنىدىغان پاكېتلار، سىرتقا ئۇلىنىدىغان ئادرېسلار).
+3. ئۇيغۇرچە: خىتاي شىركەتلىرىگە ياكى نامەلۇم مۇلازىمېتىرغا ئۇلىنىدىغانلىرىنى ئىشلەتمەڭ.
+4. ئۇيغۇرچە: تەكشۈرۈپ بولغاندىن كېيىن ئاندىن ئۈستىدىكى ئورۇنلارنىڭ بىرىگە يۆتكەڭ.
+
+ئۇيغۇرچە ئەسكەرتىش: MuhlisCode نىڭ ئىچىدە ئىككى skill بار: `opencode` ۋە `report`. `report` بولسا GitHub CLI ئارقىلىق مەسىلە (issue) يوللاش ئۈچۈن ئىشلىتىلىدۇ، شۇڭا ئۇنى ئىشلىتىشتىن بۇرۇن ئوقۇپ چىقىڭ. ئەگەر ئۇنى ئىشلەتمەكچى بولمىسىڭىز، سەپلىمىدە ئۇنىڭغا `skill.use` سىياسىتى بىلەن `deny` بېرىڭ.
+
+## MCP ۋە باشقا تەڭشەكلەر
+
+ئۇيغۇرچە چۈشەندۈرۈش: MCP (Model Context Protocol) بولسا ئاگېنتقا سىرتقى قورال ئۇلاش ئۇسۇلى، مەسىلەن ھۆججەت ئىزدەش، ساندان، ياكى تور بەت. ھەر بىر MCP مۇلازىمېتىرى ئايرىم بىر پروگرامما.
+
+ئۇيغۇرچە بۇيرۇقلار:
+
+```bash
+muhliscode mcp list              # سەپلەنگەن MCP لارنى كۆرۈش
+muhliscode mcp add               # يېڭى MCP قوشۇش
+muhliscode mcp auth <نام>        # OAuth بار ئۇزاقتىكى MCP غا كىرىش
+muhliscode mcp logout <نام>      # ساقلانغان كىرىشنى ئۆچۈرۈش
+```
+
+ئۇيغۇرچە بىخەتەرلىك: MCP مۇلازىمېتىرى كومپيۇتېرىڭىزدا كود ئىجرا قىلالايدۇ ياكى سۆزلىرىڭىزنى سىرتقا يوللىيالايدۇ. ئىشەنچلىك ۋە خىتاي شىركەتلىرىگە چېتىلمايدىغانلىرىنىلا قوشۇڭ. سەپلىمىدە `policies` ئارقىلىق (`mcp.use`) ئۇلارنى چەكلىگىلى ياكى رۇخسەت قىلغىلى بولىدۇ.
+
+ئۇيغۇرچە سەپلىمە ھۆججەتلىرى:
+
+- ئومۇمىي: `%USERPROFILE%\.config\opencode\opencode.jsonc` (ئورنىتىلغان ئەسلى `opencode` بىلەن ئورتاق)
+- پروجېكت: `opencode.jsonc` ياكى `.opencode/opencode.jsonc`
+- قوزغاتقۇچ: `OPENCODE_CONFIG` ئارقىلىق [bin/muhliscode-policy.json](./bin/muhliscode-policy.json) نى قوشۇپ يۈكلەيدۇ
+
+ئۇيغۇرچە ئاساسلىق تەڭشەك ئاچقۇچلىرى (سەپلىمە ھۆججىتىدە):
+
+| ئاچقۇچ | ئىشلىتىلىشى |
+| ------ | ----------- |
+| `providers` | مودېل تەمىنلىگۈچىلىرى ۋە ئۇلارنىڭ ئادرېسى |
+| `policies` | تەمىنلىگۈچى، MCP، skill قاتارلىقلارنى رۇخسەت قىلىش ياكى چەكلەش |
+| `permissions` | ئاگېنت قايسى ئىشلارنى قىلالايدۇ (ھۆججەت، بۇيرۇق) |
+| `agents` | ئۆزىڭىز ئېنىقلىغان ئاگېنتلار |
+| `mcp` | MCP مۇلازىمېتىرلىرى |
+| `skills` | قوشۇمچە skill مۇندەرىجىلىرى ياكى ئۇلانمىلىرى |
+| `commands` | ئۆزىڭىز ئېنىقلىغان `/` بۇيرۇقلىرى |
+| `instructions` | ئاگېنتقا ئۈزلۈكسىز بېرىلىدىغان قوشۇمچە يوليورۇق ھۆججەتلىرى |
+| `plugins` | قىستۇرمىلار |
+| `formatter`، `lsp` | كود فورماتلىغۇچ ۋە تىل مۇلازىمېتىرى |
+| `share` | سۆھبەتنى ھەمبەھىرلەش (سۈكۈتتە `manual` يا `disabled` قىلىڭ) |
+
+ئۇيغۇرچە مۇھىت ئۆزگەرگۈچىلىرى:
+
+| ئۆزگەرگۈچى | مەنىسى |
+| ---------- | ------ |
+| `MUHLISCODE_ENABLE_AUTOUPDATE=1` | ئاپتوماتىك يېڭىلاش تەكشۈرۈشىنى ئاچىدۇ (سۈكۈتتە تاقالغان) |
+| `OPENCODE_CONFIG` | قوشۇمچە سەپلىمە ھۆججىتىنىڭ يولى |
+| `OPENCODE_DISABLE_MODELS_FETCH=1` | `models.opencode.ai` دىن مودېل تىزىملىكى چۈشۈرۈشنى تاقايدۇ |
+
+ئۇيغۇرچە ئەسكەرتىش: تەڭشەك ئاچقۇچلىرىنى مەن ئامباردىكى سەپلىمە قۇرۇلمىسىدىن (`packages/schema/src/config.ts`) ئالدىم. ھەر بىرىنىڭ ئىچكى قۇرۇلمىسى (مەسىلەن `mcp` نىڭ ئېنىق شەكلى) نى بۇ يەردە تولۇق سىناپ كۆرمىدىم.
+
+## ئاگېنتلار (Agents)
+
+ئېيئاي ئاگېنت ئىككى خىل ئىچكى ئاگېنتنى ئۆز ئىچىگە ئالىدۇ، ئۇلارنى `Tab` كونۇپكىسى بىلەن ئالماشتۇرالايسىز.
+
+- ئاگېنت **build** - سۈكۈتتىكى، تولۇق ھوقۇقلۇق، ئىجادىي ئىشلەپچىقىرىش ئاگېنتى.
+- ئاگېنت **plan** - پەقەت ئوقۇش ھوقۇقىغا ئىگە، كود تەھلىلى ۋە ئىزدىنىش ئاگېنتى.
+  - ئۇيغۇرچە: سۈكۈتتە ھۆججەت تەھرىرلەشنى رەت قىلىدۇ.
+  - ئۇيغۇرچە: bash بۇيرۇقى ئىجرا قىلىشتىن ئاۋۋال ئىجازەت سورايدۇ.
+  - ئۇيغۇرچە: ناتونۇش كود ئامبىرىنى ئۈگىنىش ياكى ئۆزگەرتىش پىلانلاشقا ماس كېلىدۇ.
+
+ئۇنىڭدىن باشقا ئاگېنت **general** مۇرەككەپ ئىزدەش ۋە كۆپ باسقۇچلۇق ۋەزىپىلەرگە ئىشلىتىلىدىغان تارماق ئاگېنت بولۇپ، ئادەتتە ئىچكى ئىشلىتىلىدۇ. ئۇنى ئۇچۇرلاردا `@general` دەپ چاقىرالايسىز.
+
+## ھۆججەت قۇرۇلمىسى
+
+ئامباردىكى ئاساسلىق قۇرۇلما `packages/` ئىچىدە:
+
+| قىسىم | ۋەزىپىسى |
+| ----- | -------- |
+| `tui` | تېرمىنال ئىشلەتكۈچى كۆرۈنمە يۈزى (MuhlisCode لوگوسى مۇشۇ يەردە) |
+| `app` | گرافىكلىق (GUI) ئەپ ۋە كۆپ تىللىق i18n |
+| `core`، `server` | يادرو ۋە مۇلازىمېتىر |
+| `cli` | بۇيرۇق قۇرى قورالى |
+
+ئۇيغۇرچە ئەسكەرتىش: ھەر بىر پاكېتنىڭ تايىنىش يۆنىلىشى ئامباردىكى [AGENTS.md](./AGENTS.md) دا بايان قىلىنغان.
+
+## تۆھپە قوشۇش
+
+ئەگەر تۆھپە قوشماقچى بولسىڭىز، PR ئېچىشتىن ئاۋۋال [CONTRIBUTING.md](./CONTRIBUTING.md) نى ئوقۇڭ.
+
+## ئەسلى لايىھە ھەققىدە
+
+ئاخىرقى ئەسكەرتىش: MuhlisCode بولسا ئوچۇق كودلۇق OpenCode لايىھىسىنىڭ فورك نۇسخىسى، شۇڭا ئەسلى [LICENSE](./LICENSE) ھۆججىتى ساقلانغان. ئەسلى OpenCode گۇرۇپپىسى بۇ فوركنى ياسىمىغان ۋە ئۇنىڭغا مەسئۇل ئەمەس.
+
+ئەسلى ئېنگلىزچە نۇسخىسى: [README.en.md](./README.en.md).
