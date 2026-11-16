@@ -1,0 +1,19 @@
+# The host's native OpenTUI library for the pinned release (the `tag` of `opentui` in Cargo.toml), relative to this
+# package. script/opentui-native.ts fills it from the release zip, checked against its sha256 table, and
+# `bun run cargo` runs that first. The directory is keyed by the tag, git-ignored, and inside the worktree, so a
+# worktree on another pin keeps its own. Its name is the instruction: a cargo run without the package script (an
+# editor's) that finds it empty fails in opentui-sys with "missing native artifact <this directory>/opentui.h", whose
+# own advice is for OpenTUI's checkout; run `bun run --cwd packages/cli-rs opentui:native`. A value set in the shell
+# wins (CI, cross-target builds).
+[env]
+OPENTUI_LIB_DIR = { value = ".opentui/v0.9.1/host-fill-with-bun-run-opentui-native", relative = true, force = false }
+
+# musl links its C library dynamically (O-164): a static musl executable cannot dlopen, and the client loads native
+# plugin libraries. Rust's musl targets default to crt-static. The Linux builds link with Zig (cargo zigbuild), which
+# links musl statically unless its driver gets `-dynamic`; a gcc link reads that flag as debug letters and warns. A
+# RUSTFLAGS set in the shell replaces these, so crates/util/src/dl.rs also refuses to compile a crt-static musl build.
+[target.x86_64-unknown-linux-musl]
+rustflags = ["-C", "target-feature=-crt-static", "-C", "link-arg=-dynamic"]
+
+[target.aarch64-unknown-linux-musl]
+rustflags = ["-C", "target-feature=-crt-static", "-C", "link-arg=-dynamic"]

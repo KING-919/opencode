@@ -1,0 +1,253 @@
+# opencode-plugin-abi
+
+The SDK of native TUI plugins for `opencode-native`. A plugin is a shared library that depends on this crate alone and
+exports itself with `plugin!`, which holds every `unsafe` the C ABI needs. The host loads it at startup and again when it changes. The design, the
+lifecycle and the callback rules are in [`docs/P.4.md`](../../docs/P.4.md). Every type is documented in the rustdoc
+(`cargo doc -p opencode-plugin-abi --open`).
+
+Plugins load on Linux (`.so`), macOS (`.dylib`) and Windows (`.dll`). The host opens libraries with `dlopen`, and
+with `LoadLibraryW` on Windows.
+
+## Quick start
+
+This plugin adds a command (palette entry "Say hello", and `/hello`) that shows a toast, and a `hello` text at the end
+of the home screen's footer that runs the same command when clicked. It is `crates/plugin/examples/hello`, which the
+tests build and load, so what you see here works.
+
+Make a library crate:
+
+```sh
+cargo new --lib opencode-hello-plugin
+```
+
+`Cargo.toml`:
+
+```toml
+[package]
+name = "opencode-hello-plugin"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+name = "opencode_hello"
+crate-type = ["cdylib"]
+
+[dependencies]
+opencode-plugin-abi = { git = "https://github.com/anomalyco/opencode", rev = "<commit of your opencode-native build>" }
+```
+
+The crate is not on crates.io. Cargo finds it inside the repository by its name. A path to a checkout also works:
+`opencode-plugin-abi = { path = "<checkout>/packages/cli-rs/crates/plugin-abi" }`. Edition 2024 needs Rust 1.85
+or newer. Keep the default `panic = "unwind"`: the SDK catches a plugin's panics only when they unwind. It catches
+them on the calls the host makes and on the threads `Setup::spawner` starts, whose panic fails the plugin and is
+logged. A panic on a thread the plugin starts itself (`std::thread::spawn`) is silent: the SDK silences the plugin's
+panic hook for the whole process, so that thread ends, the plugin stays active, and nothing is logged or shown. Start
+threads with the `Spawner`.
+
+`src/lib.rs`:
+
+```rust
+use opencode_plugin_abi::{Click, Command, Node, Placement, Render, Setup, Span, Toast, Variant, plugin};
+
+fn setup(setup: &mut Setup) -> Result<(), String> {
+    // A command in the palette and as `/hello`.
+    setup.command(
+        Command::default()
+            .with_name("hello.greet".to_owned())
+            .with_title("Say hello".to_owned())
+            .with_slash(Some("hello".to_owned()))
+            .with_palette(true),
+        |host, _input| host.toast(Toast::new(Variant::Success, "Hello from a plugin")),
+    );
+    // A line at the end of the home screen's footer; a click runs the command.
+    setup.slot(Placement::append("home.footer"), |_read, _input, _changed| {
+        let text = Node::text([Span::new("hello").fg("text.muted")]);
+        Render::Show(text.on_click(Click::command("hello.greet", None)))
+    });
+    Ok(())
+}
+
+plugin!(id = "example.hello", setup);
+```
+
+`"example.hello"` is the plugin's ID; `plugin!(setup)` takes the crate's package name instead. It names the plugin in `/plugins` and in `cli.json`, and it scopes the plugin's
+storage keys. Build the library:
+
+```sh
+cargo build --release
+```
+
+The library is `target/release/libopencode_hello.so` (`.dylib` on macOS, `opencode_hello.dll` on Windows). Install it
+in one of these ways:
+
+- Copy it to `plugin.so` (`plugin.dylib` on macOS, `plugin.dll` on Windows) in a directory of its own under a
+  `plugins` directory. The global one is `~/.config/opencode/plugins/` (`$OPENCODE_CONFIG_DIR/plugins/` when that is
+  set). The project's is `.opencode/plugins/` in the project root, or in any directory between the root and the
+  working directory. A plugin in a project's directory runs only once you approve it in `/plugins`, and you are asked
+  again when its library changes. For the global one:
+
+  ```sh
+  mkdir -p ~/.config/opencode/plugins/hello
+  cp target/release/libopencode_hello.so ~/.config/opencode/plugins/hello/plugin.so
+  ```
+
+- Or name the library, or a directory that holds `plugin.so`, in the `plugins` list of `~/.config/opencode/cli.json`.
+  A path is absolute, starts with `./` or `../` (from `~/.config/opencode`), or is a `file://` URL; `~` is not
+  expanded. The object form passes `options`, which setup reads as JSON text from `Setup::options()`:
+
+  ```json
+  {
+    "plugins": [
+      { "package": "/home/me/src/opencode-hello-plugin/target/release/libopencode_hello.so", "options": { "loud": true } }
+    ]
+  }
+  ```
+
+Start `opencode-native`. The home screen's footer ends in `hello`, and `/hello` or the palette's "Say hello" shows the
+toast. While the TUI runs, a new build copied over the installed one replaces the running plugin.
+
+While you work on it, `opencode-native plugin dev <crate dir>` does the build, the install and the reload for you: it
+runs the TUI with the plugin and builds it again on each change. `opencode-native plugin test <crate dir or library>
+[--route NAME] [--command NAME[=INPUT]] [--wait TEXT]...` prints the screen as text, with no server, for a test or a
+quick look, and fails when the plugin fails, the route is not its own, or a command does not run.
+A plugin in C uses `include/opencode_plugin.h` instead of this crate.
+
+Open `/plugins` to see the plugin's state. External plugins are listed under TUI, built-ins only after `ctrl+a`.
+Enter disables or enables the selected plugin. A plugin that failed has an `x`, `failed` in its row, and a toast
+"Plugin failed: example.hello" with "Open plugins". Space on its row ("view error") shows the error, such as a
+setup's `Err`, a panic's message, or why the library was refused; on a library that never loaded, Enter shows it.
+The log file in `~/.local/share/opencode/log/` has the same errors, and each request the plugin answered with an
+error.
+
+## Which binaries load
+
+A plugin binary carries its ABI version. The host is ABI 2.0, and loads every 1.x binary too, which it serves 1.6:
+
+| Built with | Loads | What the host sends it |
+| --- | --- | --- |
+| The 1.0 SDK (the 1.0 table, without `describe`) | yes | The requests of 1.0 to 1.3, as below. The host learns the plugin's ID by running setup once at load and destroying that instance; what that instance asks for is dropped |
+| The 1.1 to 1.3 SDK | yes | The requests of 1.0 to 1.3: fences, slots and routes draw styled rows |
+| The 1.4 SDK | yes; a 1.3 host refuses it, naming both versions | The 1.4 requests |
+| The 1.5 SDK | yes; a 1.3 host refuses it, and a 1.4 host loads it and offers what it has: `composer()` reads `None`, and `edit_composer`, `Dialog::Confirm` and `Dialog::Alert` do nothing | The 1.4 requests; 1.5 adds only what the plugin asks of the host |
+| The 1.6 SDK | yes; a 1.3 host refuses it. On a 1.4 or 1.5 host the reads and verbs of 1.6 answer their defaults (see below) | The 1.4 requests, and `Deltas` to a plugin with `on_deltas` |
+| The 2.0 SDK, this crate | yes | The requests of 1.6, and the 2.0 ones: surfaces (`View`, `Draw`, `Layout`, `Input`, `Unmount`), claims (`Claim`), messages (`Message`), searches (`Search`) and the plugin list (`Plugins`); `schema/v2.json` has each |
+| A 3.x SDK | no: "plugin ABI 3.0 is not supported: … rebuild the plugin against opencode-plugin-abi 2" | — |
+
+A plugin of 1.6 rebuilt on the 2.0 SDK keeps every entry and request of 1.6 until 3.0, and what 2.0 adds is in
+`docs/P.4.md`: surfaces of contract 2.0 over the C ABI, and threads that send messages. Its source builds unchanged
+(O-154). `Host::fetch` and `Host::foreground` keep their 1.x meaning until 3.0: they return `RequestId`, and
+`RequestId(0)`, which no reply carries, for a request the host did not take, as the 1.x SDK does. They warn as
+deprecated, naming the 2.x calls `Host::try_fetch` and `Host::try_foreground`. Those return `Result<RequestId,
+String>`: an `Err` is a request the host did not take, as while the effects that wait fill its queue, and no reply
+comes for it; an ID always gets its one reply.
+
+A request belongs to what asked for it, on every carrier. One a mount's call asks for (a command of the route it
+shows, or a handler of the mount's input) is that mount's: once the mount closes, it is not sent, a program does not
+start, and its reply is dropped, also when the surface opens again under the same key. One from setup, a global
+command, an event, a wake, or the mount's begin and end (`Event::Mount`, which the plugin hears, not the mount) is the
+activation's, and its reply comes unless the plugin is disposed first.
+
+### The source promise of 2.x
+
+A plugin's source that builds on the 2.0 SDK builds on every later 2.x SDK (carbon-4, big-boi 14). So every type of
+the contract that a later 2.x may extend is `#[non_exhaustive]` from 2.0 on, to the plugin's crate:
+
+- A struct literal of one does not compile, also with `..Default::default()`. Build it from its constructor or
+  `Default`, and set what it needs with its builders and `with_` setters, one a field:
+  `Command::default().with_name("hello.greet".to_owned()).with_palette(true)`, `Toast::new(..).title(..)`,
+  `Attention::new(..).with_sound(..)`, `PanelAction::new(title, action).with_key(..)`, `OpenPanel::new("notes")`,
+  `Overlay::new(..)`, `Foreground::new("sh").with_args(..)`, `Interact::default().with_focusable(true)`,
+  `Layout::default().width(..).grow()`, `LayoutReply::default().paint(..).again()`.
+- A node of `v2::Node` is built with its constructors (`Node::column`, `row`, `text`, `scroll`, `list`, `input`,
+  `diff`, `code`, `image`, `markdown`, `spinner`, `canvas`, `slot`, `keep`) and its setters (`with_id`, `bg`,
+  `border`, `placeholder`, `numbers`, …); a pattern of a variant needs `..`: `Node::Keep { key, .. }`.
+- A `match` on an enum of the contract (`interact::Event`, `claim::Part`, `v2::Cause`, `SessionStatus`, …) needs a
+  `_` arm, which a kind a later 2.x adds reaches; a pattern of an event's fields needs `..`:
+  `Event::Paste { text, .. }`.
+- What the host fills (`SurfaceInput`, `Geometry`, `Session`, …) is read as before.
+- Struct variants a plugin builds (a scroll verb, a target, a composer edit, an anchor) do not grow: a later 2.x adds
+  a variant for a new form. `Rgba`, `Edges`, `Sides`, the rects and `ThemeMode` are whole and stay open.
+- The table `export_plugin!` exports is built by the SDK (`runtime::table`), so a table entry a later 2.x appends is
+  no break either.
+
+The wire is the other half of the promise: a later 2.x adds only optional fields, request types the host sends only
+to a library of that minor, and node kinds an author lowers for an older host with `v2::View::or` (below). The
+host's own build turns on the crate's `host` feature, which leaves its types exhaustive so the host must handle each
+addition. That feature is for the host only and is not covered by this promise: a crate that turns it on may break
+on any later 2.x, so a plugin never turns it on. `tests/sdk.rs` builds a pinned author crate, `tests/pinned`, against this SDK and
+against the additions a later 2.x makes (the `next` feature), so a change that breaks that source fails the SDK's own
+tests.
+
+ABI 1.6 adds the small reads and verbs: a claim's own size (`Setup::sized`), the streaming deltas (`Setup::on_deltas`),
+the model's variants, the session tabs, the keymap's state, the mouse selection, a program in the foreground, the
+terminal title, the theme, a link on a `Span`, and an `xlarge` panel ([`docs/P.4.md`](../../docs/P.4.md) lists each
+with its TS counterpart). A 1.6 plugin needs no new host: on an older one a read returns `None`, an empty list or
+`false`, a verb that answers a `bool` answers `false` and does nothing, `sized` claims get 0, a link is not drawn, and
+an `xlarge` panel shows `large`. Rebuilding a 1.4 plugin on the 1.6 SDK needs no change, except that `SlotInput`,
+`Span` and `Manifest` have new fields, so a struct literal of one needs `..Default::default()`, and a `SlotClaim`
+literal needs `size: false`.
+
+A binary of an older SDK keeps the safety of its own SDK. A 1.3 `Waker` is a raw pointer to the host, and so is
+the `Waker` of a 1.4 build from before `Waker` became `Clone`. Such a plugin must stop its threads before its state
+drops; a 1.4 build of today's SDK cannot wake a host that is gone.
+
+## Moving from the 1.4 SDK to 1.5
+
+A 1.4 plugin keeps working unbuilt: the binary boundary and the JSON only grew. Rebuilding it on the 1.5 SDK is a
+one-time source migration where it spells out the types that grew:
+
+- A `Node::Box { … }` literal no longer compiles, and Rust has no `..Default::default()` for an enum variant: build
+  boxes with `Node::column`, `Node::row` and their setters (`.gap`, `.padding`, `.bg`, `.border`, `.padding_sides`, …).
+- A `Layout { … }` literal needs `..Layout::default()`, or the builders (`.width`, `.grow`, `.shrink`, `.height`, …).
+- A pattern that names every field of `Node::Box` or `Layout` needs `..`, and an exhaustive `match` on `Dialog` or
+  `HostRequest` needs the new variants or `_`.
+
+2.0 made these types `#[non_exhaustive]` ("The source promise of 2.x", above).
+
+1.5 adds:
+
+- `Dialog::Confirm` and `Dialog::Alert`, TS `dialog.confirm` and `dialog.alert`. A confirm runs its action with the
+  input `true` or `false`; an alert runs its action once it closes, however it closes. A dialog answers the
+  activation that showed it only: it closes when the plugin is disabled, fails or reloads.
+- On a `Node::Box`: `border(Border)` (sides, style, color, a title and its alignment), `padding_sides(Edges)`,
+  `flex_wrap()` and `overflow(Overflow::Hidden)`. On a `Layout`: `height`, `min_height`, `max_height` and
+  `margin(Edges)`. A border without a color is white, as TS draws it; name a token such as `border.base` to follow the
+  theme.
+- The composer: `Read::composer()` (its text, the cursor as a byte offset, and its focus) and
+  `Host::edit_composer(ComposerEdit::{Set, Insert, Submit})`, which go through the composer's own edit path. They act
+  only on a composer that shows, and a submit only where the composer may submit (no home form, its pane has the
+  input).
+- `Read::abi_minor()`, the host's minor version, for a plugin that falls back on an older host; and
+  `export_plugin!("my.plugin", setup, requires_minor = 5)` for one that cannot, which a 1.4 host then refuses with a
+  message instead of running it with its 1.5 requests refused. That form exports ABI 1.x, as it always did, until
+  3.0, and warns as deprecated from 2.0 on. On 2.x, `Read::abi()` and `Setup::abi()` name the major, minor and
+  features the host serves, `View::or` lowers a node kind a later 2.x minor adds for an older host, and
+  `plugin!(id = "my.plugin", requires_minor = 1, setup)` asks for host 2.1, which an older host refuses at load.
+- What a dispose callback that panics asked for is dropped, as for any call that panics; the others keep theirs.
+
+## Moving from the 1.3 SDK to 1.4
+
+A 1.3 plugin keeps working unbuilt. To rebuild it on the 1.4 SDK, change:
+
+- `Setup` has a lifetime, `Setup<'a>`. `fn setup(setup: &mut Setup) -> Result<(), String>` still compiles.
+- `Setup::host()` returns `&dyn Host` for setup only, and a callback cannot keep it (the compiler refuses). Each
+  callback gets the host as an argument instead: a render gets `&dyn Read`, which only reads, and a command, event,
+  reply, mount or wake handler gets `&dyn Host`, which also has effects.
+- `Host` is a trait now, not a struct. `storage_get` returns `Option<serde_json::Value>`, not JSON text.
+  `storage_set(key, value)` takes a `serde_json::Value` and returns nothing. `toast(Toast)` takes a `Toast`, as in
+  `Toast::new(Variant::Info, "text")`; the 1.3 `Toast` enum is `Variant`. `theme_mode()` returns `ThemeMode`, dark on a
+  host without one. `log` is gone.
+- `Host::waker()` is `Setup::waker()`. `Waker` is `Clone`, not `Copy`. The host revokes it before your
+  `on_dispose` callbacks run, so a late `wake` does nothing.
+- `command(command, |input| …)` is `command(command, |host, input| …)`.
+- `code_block(language, |fence| -> Option<Vec<Line>>)` is `code_block(language, |read, fence| -> Fenced)`: `None`
+  is `Fenced::Code`, `Some(lines)` is `Fenced::Lines { lines, fg: None, drag: false }`. `Fence::streaming` now means
+  only that the message streams; whether the fence has closed is `Fence::closed`. `Fence` also has `key` and `width`.
+- `slot(kind, path, |session_id| rows)` is `slot_lines(kind, path, |session_id| rows)`, and `route(name, || rows)` is
+  `route_lines(name, || rows)`. These keep the 1.3 rows. The 1.4 forms are `slot(Placement, |read, input, changed|
+  -> Render)` and `route(name, |read, changed| -> Render)`, which draw nodes and get what changed.
+- `Span::fg` takes `impl Into<Color>`: a `&'static str`, a `String` or an `Rgba`. Pass a borrowed `&str` as
+  `.to_owned()`. `Command` and `Span` have new fields, so a struct literal of either needs `..Default::default()`.
+- Clean up in `Setup::on_dispose(|host| …)`, which runs when the plugin is disabled, unloaded, reloaded, when its
+  setup fails, and when the TUI exits.
