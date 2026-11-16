@@ -4,6 +4,8 @@ import {
   displayPickerPath,
   nextSuggestionIndex,
   resolvePickerTarget,
+  trimPickerPath,
+  withPickerSeparator,
   type PickerPolicy,
 } from "./domain"
 
@@ -152,7 +154,7 @@ export function canSearchPickerInput(input: string, context: PickerComboboxConte
 
   if (!context.root) return true
 
-  return input.replace(/\/+$/, "") !== displayPickerPath(context.root, input, context.home).replace(/\/+$/, "")
+  return trimPickerPath(input) !== trimPickerPath(displayPickerPath(context.root, input, context.home))
 }
 
 export function pickerComboboxView(state: PickerComboboxState) {
@@ -188,7 +190,7 @@ function key(
     if (match.type === "file") return handled(choose(state, match, context))
     const value = displayPickerPath(match.absolute, state.input, context.home)
 
-    return handled(withInput(state, value.endsWith("/") ? value : value + "/", context, []))
+    return handled(withInput(state, withPickerSeparator(value), context, []))
   }
 
   if (event.key === "ArrowDown" || event.key === "ArrowUp") {
