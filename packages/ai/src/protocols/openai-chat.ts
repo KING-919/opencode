@@ -542,6 +542,11 @@ const lowerAssistantMessage = Effect.fnUntraced(function* (
   const reasoning: ReasoningPart[] = []
   const toolCalls: OpenAIChatAssistantToolCall[] = []
   for (const part of message.content) {
+    // A provider-executed tool call keeps its result inside the assistant message, and the Chat
+    // wire format has no way to replay that pair: emitting the call without a matching tool
+    // message is invalid too. Dropping both keeps a session usable after switching a provider
+    // that executed tools server-side to this route.
+    if ((part.type === "tool-call" || part.type === "tool-result") && part.providerExecuted === true) continue
     if (!ProviderShared.supportsContent(part, ["text", "reasoning", "tool-call"]))
       return yield* ProviderShared.unsupportedContent("OpenAI Chat", "assistant", ["text", "reasoning", "tool-call"])
     if (part.type === "text") {
