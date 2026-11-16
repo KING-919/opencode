@@ -21,7 +21,7 @@ export type AgentID = string
 
 export type ProviderID = string
 
-export type ProviderCompaction = { type: "summary" } | { type: "native" }
+export type ProviderCompaction = { type?: "summary" | "native"; window?: number }
 
 export type ProviderCacheTTL = `${number}${"ms" | "s" | "m" | "h" | "d"}`
 
@@ -2436,6 +2436,7 @@ export type ConfigEntry =
         agents?: {
           [x: string]: {
             model?: string | { providerID: string; model: string; variant?: string }
+            compaction?: { window?: number }
             request?: { headers?: { [x: string]: string }; body?: { [x: string]: JsonValue } }
             system?: string
             description?: string
@@ -2513,7 +2514,12 @@ export type ConfigEntry =
                 }
           }
         }
-        compaction?: { auto?: boolean; keep?: { tokens?: number }; buffer?: ConfigCompactionPercent | number }
+        compaction?: {
+          auto?: boolean
+          keep?: { tokens?: number }
+          window?: number
+          buffer?: ConfigCompactionPercent | number
+        }
         skills?: Array<string>
         commands?: {
           [x: string]: {
