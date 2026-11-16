@@ -294,6 +294,44 @@ describe("PatchTool", () => {
     ),
   )
 
+  it.live("keeps the base patch result when no editing config is set", () =>
+    withTempTool((directory, registry) =>
+      Effect.gen(function* () {
+        const settled = yield* executeTool(
+          registry,
+          call("*** Begin Patch\n*** Add File: default-style.txt\n+created\n*** End Patch"),
+        )
+        expect(settled.status).toBe("completed")
+        if (settled.status !== "completed") return
+        expect(settled.content).toEqual([
+          { type: "text", text: "Success. Updated the following files:\nA default-style.txt" },
+        ])
+        expect(yield* Effect.promise(() => fs.readFile(path.join(directory, "default-style.txt"), "utf8"))).toBe(
+          "created\n",
+        )
+      }),
+    ),
+  )
+
+  it.live("keeps editing when a later config sets another experimental option", () =>
+    withTempTool(
+      () =>
+        Effect.gen(function* () {
+          const hook = sessionHooks.get("context")!
+          const claude = contextEvent("claude-sonnet-4")
+          yield* hook(claude)
+          expect(Object.keys(claude.tools)).toEqual(["patch", "read"])
+        }),
+      [
+        ...editingConfig({ add: ["patch"], remove: ["edit", "write"] }),
+        new Document({
+          type: "document",
+          info: new Info({ experimental: new ConfigExperimental.Info({ subagent_depth: 2 }) }),
+        }),
+      ],
+    ),
+  )
+
   it.live("includes the applied diff when result_style is diff and a rule overrides it", () =>
     withTempTool(
       (directory, registry) =>
@@ -308,6 +346,9 @@ describe("PatchTool", () => {
           const text = settled.content?.[0]?.type === "text" ? settled.content[0].text : ""
           expect(text).toContain("A style-diff.txt (+1 -0)")
           expect(text).toContain("+created")
+          expect(text).toContain("@@")
+          expect(text).not.toContain("Index:")
+          expect(text).not.toContain(directory)
           expect(yield* Effect.promise(() => fs.readFile(path.join(directory, "style-diff.txt"), "utf8"))).toBe(
             "created\n",
           )
@@ -316,6 +357,28 @@ describe("PatchTool", () => {
         result_style: "summary",
         rules: [{ match: "^test/claude", result_style: "diff" }],
       }),
+    ),
+  )
+
+  it.live("truncates a large diff before returning it to the model", () =>
+    withTempTool(
+      (directory, registry) =>
+        Effect.gen(function* () {
+          const lines = Array.from({ length: 250 }, (_, index) => `+line ${index}`).join("\n")
+          const settled = yield* executeTool(
+            registry,
+            call(`*** Begin Patch\n*** Add File: large-diff.txt\n${lines}\n*** End Patch`),
+          )
+          expect(settled.status).toBe("completed")
+          if (settled.status !== "completed") return
+          const text = settled.content?.[0]?.type === "text" ? settled.content[0].text : ""
+          expect(text).toContain("... diff truncated ...")
+          expect(text).not.toContain("line 249")
+          expect(yield* Effect.promise(() => fs.readFile(path.join(directory, "large-diff.txt"), "utf8"))).toContain(
+            "line 249",
+          )
+        }),
+      editingConfig({ result_style: "diff" }),
     ),
   )
 
@@ -348,7 +411,7 @@ describe("PatchTool", () => {
               expect(settled.content).toEqual([
                 {
                   type: "text",
-                  text: "Success. Updated the following files:\nA nested/new.txt (+1 -0)\nM update.txt (+1 -1)\nD remove.txt (+0 -1)\nTrust this result. Re-read only if you need surrounding context or the patch failed.",
+                  text: "Success. Updated the following files:\nA nested/new.txt\nM update.txt\nD remove.txt",
                 },
               ])
               const modelText = settled.content?.[0]?.type === "text" ? settled.content[0].text : ""
@@ -519,7 +582,7 @@ describe("PatchTool", () => {
                 ),
               ).toMatchObject({
                 status: "completed",
-                content: [{ type: "text", text: "Success. Updated the following files:\nA created.txt (+1 -0)\nM moved.txt (+1 -1)\nTrust this result. Re-read only if you need surrounding context or the patch failed." }],
+                content: [{ type: "text", text: "Success. Updated the following files:\nA created.txt\nM moved.txt" }],
               })
               expect(yield* exists(source)).toBe(false)
               expect(yield* Effect.promise(() => fs.readFile(path.join(tmp.path, "moved.txt"), "utf8"))).toBe("after\n")
@@ -577,7 +640,7 @@ describe("PatchTool", () => {
           ),
         ).toMatchObject({
           status: "completed",
-          content: [{ type: "text", text: "Success. Updated the following files:\nM moved.txt (+0 -0)\nTrust this result. Re-read only if you need surrounding context or the patch failed." }],
+          content: [{ type: "text", text: "Success. Updated the following files:\nM moved.txt" }],
         })
         expect(yield* exists(source)).toBe(false)
         expect(yield* Effect.promise(() => fs.readFile(destination, "utf8"))).toBe("same\n")

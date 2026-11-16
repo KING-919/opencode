@@ -15,6 +15,7 @@ import { Location } from "../../location.js"
 import { FileAccess } from "../../file-access.js"
 import { Patch } from "@opencode/util/patch"
 import type { ConfigExperimental } from "@opencode/schema/config/experimental"
+import type { Document, Entry } from "@opencode/schema/config"
 import { Permission } from "../../permission.js"
 import { Session } from "../../session.js"
 import DESCRIPTION from "../patch.txt"
@@ -280,7 +281,7 @@ export const Plugin = {
               const session = yield* sessions.get(context.sessionID).pipe(Effect.orElseSucceed(() => undefined))
               const resultStyle = selectEditingResult(
                 session?.model,
-                Config.latest(yield* config.entries(), "experimental")?.editing,
+                configuredEditing(yield* config.entries()),
               )
               return {
                 // The multi-file patch contract intentionally leaves structured output empty.
@@ -297,7 +298,7 @@ export const Plugin = {
     const hook = (event: SessionHooks["context"]) =>
       Effect.gen(function* () {
         const entries = yield* config.entries()
-        const tools = selectEditingTools(event.model, Config.latest(entries, "experimental")?.editing)
+        const tools = selectEditingTools(event.model, configuredEditing(entries))
         for (const name of EDITING_TOOLS) {
           if (!tools.has(name)) delete event.tools[name]
         }
@@ -337,8 +338,8 @@ function selectEditingResult(
   model: ModelRef | undefined,
   editing: ConfigExperimental.Editing | undefined,
 ): ConfigExperimental.EditingResult {
-  if (!editing) return "counts"
-  return matchingRule(model, editing)?.result_style ?? editing.result_style ?? "counts"
+  if (!editing) return "summary"
+  return matchingRule(model, editing)?.result_style ?? editing.result_style ?? "summary"
 }
 
 function renderResult(
@@ -351,9 +352,19 @@ function renderResult(
     }`
   return [
     "Success. Updated the following files:",
-    ...files.flatMap((file) => (style === "diff" ? [`${label(file)}\n${file.patch}`] : [label(file)])),
-    "Trust this result. Re-read only if you need surrounding context or the patch failed.",
+    ...files.flatMap((file) => (style === "diff" ? [`${label(file)}\n${renderDiff(file.patch)}`] : [label(file)])),
   ].join("\n")
+}
+
+function renderDiff(patch: string) {
+  const lines = patch.split("\n")
+  const start = lines.findIndex((line) => line.startsWith("@@"))
+  if (start === -1) return ""
+  const body = lines.slice(start)
+  const limited = body.slice(0, 200)
+  const text = limited.join("\n")
+  const clipped = text.length > 12_000 ? text.slice(0, 12_000) : text
+  return body.length > limited.length || text.length > clipped.length ? `${clipped}\n... diff truncated ...` : clipped
 }
 
 function errorMessage(error: unknown) {
@@ -362,6 +373,13 @@ function errorMessage(error: unknown) {
     return error.actual === "directory" ? "path is a directory" : `path is ${error.actual}`
   if (error instanceof Environment.Failed) return errorMessage(error.cause)
   return error instanceof Error ? error.message : String(error)
+}
+
+// Read per field so a later config that sets other experimental options doesn't hide this one.
+function configuredEditing(entries: readonly Entry[]) {
+  return entries.findLast(
+    (entry): entry is Document => entry.type === "document" && entry.info.experimental?.editing !== undefined,
+  )?.info.experimental?.editing
 }
 
 function patchFile(change: Prepared, after = change.after): typeof FileDiff.Info.Type {
