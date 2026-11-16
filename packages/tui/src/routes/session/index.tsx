@@ -53,7 +53,7 @@ import {
   executeCalls,
   executeCallSummary,
   finiteNumber,
-  primitiveInputSummary,
+  genericToolSummary,
   toolDisplayContent,
   toolDisplayMetadata,
   type ExecuteCall,
@@ -2740,24 +2740,27 @@ type ToolProps = {
   part: SessionMessageAssistantTool
 }
 function GenericTool(props: ToolProps) {
+  const ctx = use()
   const theme = useTheme()
   const output = createMemo(() => stripAnsi(props.output?.trim() ?? ""))
   const input = createMemo(() => Object.entries(props.input))
   const [expanded, setExpanded] = createSignal(false)
   const expandable = createMemo(() => input().length > 0 || output().length > 0)
   const loading = createMemo(() => props.part.state.status === "streaming" || props.part.state.status === "running")
+  const maxWidth = createMemo(() => Math.max(0, ctx.width - 3 - INLINE_TOOL_ICON_WIDTH))
 
   return (
     <>
       <InlineTool
         icon={props.part.state.status === "error" ? "✗" : "✓"}
         complete={props.part.state.status === "completed"}
-        pending={props.tool}
+        pending={Locale.truncateWidth(props.tool.replace(/\s+/g, " "), maxWidth())}
         spinner={loading()}
+        truncate
         part={props.part}
         onClick={expandable() ? () => setExpanded((value) => !value) : undefined}
       >
-        {genericToolSummary(props.tool, props.input)}
+        {genericToolSummary(props.tool, props.input, maxWidth())}
       </InlineTool>
       <Show when={expanded()}>
         <box paddingLeft={3 + INLINE_TOOL_ICON_WIDTH}>
@@ -2791,10 +2794,7 @@ function GenericTool(props: ToolProps) {
   )
 }
 
-export function genericToolSummary(tool: string, input: Record<string, unknown>) {
-  const args = primitiveInputSummary(input).replace(/\s+/g, " ")
-  return `${tool}${args ? ` ${args}` : ""}`
-}
+export { genericToolSummary }
 
 function useToolPermission(part: () => SessionMessageAssistantTool | undefined) {
   const ctx = use()
@@ -2813,6 +2813,7 @@ function InlineTool(props: {
   complete: unknown
   pending: string
   spinner?: boolean
+  truncate?: boolean
   running?: boolean
   status?: JSX.Element
   children: JSX.Element
@@ -2860,6 +2861,7 @@ function InlineTool(props: {
       complete={props.complete}
       pending={props.pending}
       spinner={props.spinner}
+      truncate={props.truncate}
       status={props.status}
       onMouseOver={() => clickable() && setHover(true)}
       onMouseOut={() => setHover(false)}
@@ -3359,6 +3361,7 @@ export function subagentModelLabel(
 export { executeCallSummary }
 
 function ExecuteCallView(props: { call: Accessor<ExecuteCall> }) {
+  const ctx = use()
   const theme = useTheme()
   const renderer = useRenderer()
   const [expanded, setExpanded] = createSignal(false)
@@ -3387,7 +3390,9 @@ function ExecuteCallView(props: { call: Accessor<ExecuteCall> }) {
           <text fg={color()}>{props.call().status === "error" ? "✗" : "›"}</text>
         </box>
         <text flexGrow={1} wrapMode="none" truncate fg={color()}>
-          {expanded() ? props.call().tool : executeCallSummary(props.call())}
+          {expanded()
+            ? props.call().tool
+            : executeCallSummary(props.call(), Math.max(0, ctx.width - 3 - INLINE_TOOL_ICON_WIDTH))}
         </text>
       </box>
       <Show when={expanded()}>
