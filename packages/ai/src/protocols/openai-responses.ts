@@ -9,6 +9,7 @@ import { HttpTransport } from "../route/transport/index.js"
 import type { LLMRequest, ToolDefinition, ToolEntry } from "../schema/index.js"
 import { requestTTL } from "../cache-policy.js"
 import { resolveEffortUpdates } from "../effort-updates.js"
+import { toolsUpdate } from "../tool-updates.js"
 import { OpenResponses } from "./open-responses.js"
 import { OpenResponsesOptions } from "./utils/open-responses-options.js"
 import { JsonObject, lenient, optionalArray, optionalNull, ProviderShared } from "./shared.js"
@@ -159,6 +160,8 @@ const adapter = {
   id: ADAPTER,
   name: NAME,
   restoreHostedToolItem: (item: unknown) => (Schema.is(OpenAIResponsesHostedToolItem)(item) ? item : undefined),
+  lowerAdditionalTools: (tools: ReadonlyArray<ToolEntry>, custom: ReadonlyMap<string, OpenAIFreeform.Custom>) =>
+    Effect.forEach(tools, (tool) => lowerToolEntry(tool, custom)),
 } satisfies OpenResponses.ProviderAdapter
 
 // GPT-6 and later default to `configuration_update` support, except in `reasoning.mode: "pro"`
@@ -171,6 +174,14 @@ const supportsEffortUpdates = (request: LLMRequest) => {
   if (override !== undefined) return override
   const match = /(?:^|\/)gpt-(\d+)(?:\.\d+)?(?:-|$)/i.exec(request.model.id)
   return match !== null && Number(match[1]) >= 6
+}
+
+// Without starting tools there is no cached tool list to preserve. Calls to tools added through `additional_tools`
+// come back under a namespace named after the tool, which can't tell a redefined starting tool from the original.
+const supportsToolUpdates = (request: LLMRequest) => {
+  if (request.model.capabilities?.tools?.updates !== true || request.tools.length === 0) return false
+  const starting = new Set(request.tools.map((tool) => tool.name))
+  return request.messages.every((message) => !toolsUpdate(message)?.add.some((tool) => starting.has(tool.name)))
 }
 
 const nativeImageToolInput = (tool: ToolDefinition) => {
@@ -334,6 +345,7 @@ export const protocol = Protocol.make({
       : ProviderShared.eventError(ADAPTER, `${event.type} is missing item_id`)
   }),
   supportsEffortUpdates,
+  supportsToolUpdates,
 })
 
 const endpoint = Endpoint.path<OpenAIResponsesBody>(PATH, { baseURL: DEFAULT_BASE_URL })

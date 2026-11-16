@@ -15,6 +15,7 @@ import {
   type TextPart,
   type ToolCallPart,
   type ToolDefinition,
+  type ToolEntry,
   type ToolResultPart,
   type UserMessage,
 } from "../schema/index.js"
@@ -30,6 +31,7 @@ import {
 } from "./shared.js"
 import { classifyProviderFailure } from "../provider-error.js"
 import { effortUpdate } from "../effort-updates.js"
+import { inlineToolNames, removalNotice, toolsUpdate } from "../tool-updates.js"
 import { OpenResponsesOptions } from "./utils/open-responses-options.js"
 import { Lifecycle } from "./utils/lifecycle.js"
 import { ToolStream } from "./utils/tool-stream.js"
@@ -189,9 +191,49 @@ export const HostedToolReplay = Schema.StructWithRest(
 )
 export type HostedToolReplayItem = Schema.Schema.Type<typeof HostedToolReplay>
 
+export const Tool = Schema.Struct({
+  type: Schema.tag("function"),
+  name: Schema.String,
+  description: Schema.String,
+  parameters: JsonObject,
+  strict: Schema.optional(Schema.Boolean),
+})
+
+export const CustomTool = Schema.Struct({
+  type: Schema.tag("custom"),
+  name: Schema.String,
+  description: Schema.String,
+  format: Schema.Union([
+    Schema.Struct({ type: Schema.tag("text") }),
+    Schema.Struct({
+      type: Schema.tag("grammar"),
+      syntax: Schema.Literals(["lark", "regex"]),
+      definition: Schema.String,
+    }),
+  ]),
+})
+
+export const HostedTool = Schema.StructWithRest(
+  Schema.Struct({
+    type: Schema.String,
+  }),
+  [JsonObject],
+)
+export type HostedTool = Schema.Schema.Type<typeof HostedTool>
+
+const NamedTool = Schema.Struct({ type: Schema.Literals(["function", "custom"]), name: Schema.String })
+
+// Tools added mid-conversation. Only the OpenAI extension lowers it; other hosts fold tool updates.
+export const AdditionalTools = Schema.Struct({
+  type: Schema.Literal("additional_tools"),
+  role: Schema.Literal("developer"),
+  tools: Schema.Array(Schema.Union([Tool, CustomTool, HostedTool])),
+})
+
 export const InputItem = Schema.Union([
   CompactionItem,
   ConfigurationUpdate,
+  AdditionalTools,
   Schema.Struct({ type: Schema.tag("message"), role: Schema.tag("system"), content: Schema.String }),
   Schema.Struct({ type: Schema.tag("message"), role: Schema.tag("developer"), content: Schema.String }),
   Schema.Struct({
@@ -243,38 +285,6 @@ type OpenResponsesReasoningInput = {
   summary: Array<{ type: "summary_text"; text: string }>
   encrypted_content?: string | null
 }
-export const Tool = Schema.Struct({
-  type: Schema.tag("function"),
-  name: Schema.String,
-  description: Schema.String,
-  parameters: JsonObject,
-  strict: Schema.optional(Schema.Boolean),
-})
-
-export const CustomTool = Schema.Struct({
-  type: Schema.tag("custom"),
-  name: Schema.String,
-  description: Schema.String,
-  format: Schema.Union([
-    Schema.Struct({ type: Schema.tag("text") }),
-    Schema.Struct({
-      type: Schema.tag("grammar"),
-      syntax: Schema.Literals(["lark", "regex"]),
-      definition: Schema.String,
-    }),
-  ]),
-})
-
-export const HostedTool = Schema.StructWithRest(
-  Schema.Struct({
-    type: Schema.String,
-  }),
-  [JsonObject],
-)
-export type HostedTool = Schema.Schema.Type<typeof HostedTool>
-
-const NamedTool = Schema.Struct({ type: Schema.Literals(["function", "custom"]), name: Schema.String })
-
 export const ToolChoice = Schema.Union([
   Schema.Literals(["auto", "none", "required"]),
   NamedTool,
@@ -434,6 +444,14 @@ export interface ProviderAdapter {
     readonly request: LLMRequest
   }) => MediaInput | undefined
   readonly restoreHostedToolItem?: (item: unknown) => HostedToolReplayItem | undefined
+  /** Lowers the tools a `Message.tools(...)` marker adds; routes without it must fold tool updates. */
+  readonly lowerAdditionalTools?: (
+    tools: ReadonlyArray<ToolEntry>,
+    custom: ReadonlyMap<string, OpenAIFreeform.Custom>,
+  ) => Effect.Effect<
+    ReadonlyArray<Schema.Schema.Type<typeof Tool> | Schema.Schema.Type<typeof CustomTool> | HostedTool>,
+    AIError
+  >
 }
 
 const BASE_ADAPTER: ProviderAdapter = { id: ADAPTER, name: NAME }
@@ -451,6 +469,7 @@ export interface ParserState {
   readonly outputItems: Readonly<Record<number, string>>
   readonly message: { readonly id: string; readonly phase: MessagePhase | null | undefined } | undefined
   readonly reasoningItems: Readonly<Record<string, ReasoningStreamItem>>
+  readonly inlineTools: ReadonlySet<string>
 }
 
 type ReasoningSummaryStatus = "active" | "can-conclude" | "concluded"
@@ -538,6 +557,7 @@ const lowerToolCall = (
   part: ToolCallPart,
   providerMetadataKey: string,
   custom: OpenAIFreeform.Custom | undefined,
+  inlineTools: ReadonlySet<string>,
 ): OpenResponsesInputItem => {
   const id = OpenAIFreeform.keepsItemID(part.providerMetadata, providerMetadataKey, custom !== undefined)
     ? itemID(part.providerMetadata, providerMetadataKey)
@@ -555,9 +575,18 @@ const lowerToolCall = (
     ...(id === undefined ? {} : { id }),
     call_id: part.id,
     name: part.name,
-    namespace: part.namespace,
+    namespace: part.namespace ?? addedToolCallNamespace(part, providerMetadataKey, inlineTools),
     arguments: ProviderShared.encodeJson(part.input === undefined ? {} : part.input),
   }
+}
+
+// A call parsed from this route replays its namespace as received. gpt-5.x rejects a call to a tool added through
+// `additional_tools` without the tool-named namespace, so a call from another model gets one.
+const addedToolCallNamespace = (part: ToolCallPart, providerMetadataKey: string, inlineTools: ReadonlySet<string>) => {
+  if (!inlineTools.has(part.name)) return undefined
+  const metadata = part.providerMetadata?.[providerMetadataKey]
+  if (metadata?.itemId === undefined) return part.name
+  return typeof metadata.namespace === "string" ? metadata.namespace : undefined
 }
 
 const lowerReasoning = (part: ReasoningPart, providerMetadataKey: string): OpenResponsesReasoningInput | undefined => {
@@ -647,6 +676,7 @@ const lowerMessages = Effect.fnUntraced(function* (request: LLMRequest, adapter:
   const custom = OpenAIFreeform.tools(request)
   const customTool = (part: ToolCallPart | ToolResultPart) =>
     part.namespace === undefined ? custom.get(part.name) : undefined
+  const inlineTools = inlineToolNames(request)
 
   for (const message of request.messages) {
     const rawMetadata =
@@ -662,6 +692,24 @@ const lowerMessages = Effect.fnUntraced(function* (request: LLMRequest, adapter:
         if (last !== undefined && "type" in last && last.type === "configuration_update") input.pop()
         input.push({ type: "configuration_update", reasoning: { effort: update.effort ?? DEFAULT_EFFORT } })
         continue
+      }
+      const tools = toolsUpdate(message)
+      if (tools) {
+        if (adapter.lowerAdditionalTools === undefined)
+          return yield* ProviderShared.invalidRequest(`${adapter.name} does not support mid-conversation tool updates`)
+        if (tools.add.length > 0)
+          input.push({
+            type: "additional_tools",
+            role: "developer",
+            tools: yield* adapter.lowerAdditionalTools(tools.add, custom),
+          })
+        if (tools.remove.length > 0)
+          input.push({
+            type: "message",
+            role: "developer",
+            content: removalNotice(tools.remove),
+          })
+        if (message.content.length === 0) continue
       }
       input.push({
         type: "message",
@@ -741,7 +789,7 @@ const lowerMessages = Effect.fnUntraced(function* (request: LLMRequest, adapter:
         if (part.type === "tool-call") {
           flushText()
           if (part.providerExecuted === true) continue
-          input.push(lowerToolCall(part, providerMetadataKey, customTool(part)))
+          input.push(lowerToolCall(part, providerMetadataKey, customTool(part), inlineTools))
           continue
         }
         if (part.type === "tool-result" && part.providerExecuted === true) {
@@ -1015,6 +1063,24 @@ const ITEM_ID_PREFIX: Readonly<Record<string, string>> = {
   compaction: "cmp",
 }
 
+// Some models return calls to tools added through `additional_tools` under a namespace named after the tool. The call
+// keeps the tool's own name, and its metadata keeps the namespace so replay sends it back as received.
+const addedToolNamespace = (state: Pick<ParserState, "inlineTools">, item: OutputItem) =>
+  item.namespace !== undefined && item.namespace === item.name && state.inlineTools.has(item.namespace)
+    ? item.namespace
+    : undefined
+
+const callNamespace = (state: Pick<ParserState, "inlineTools">, item: OutputItem) =>
+  addedToolNamespace(state, item) === undefined ? item.namespace : undefined
+
+const callMetadata = (state: ParserState, item: OutputItem, custom: boolean) => {
+  const namespace = addedToolNamespace(state, item)
+  return providerMetadata(state, {
+    ...OpenAIFreeform.metadata(item.id, custom),
+    ...(namespace === undefined ? {} : { namespace }),
+  })
+}
+
 // An item adopts the id already open in its output slot, since GitHub Copilot
 // sends a different id on every event, including the item's own done event.
 // Otherwise it keeps its id or gets a locally minted one.
@@ -1176,13 +1242,13 @@ const onOutputItemAdded = (state: ParserState, event: NormalizedEvent): StepResu
   if ((item.type !== "function_call" && item.type !== "custom_tool_call") || !item.call_id) return [state, NO_EVENTS]
   if (state.tools[item.id] !== undefined) return [state, NO_EVENTS]
   const custom = item.type === "custom_tool_call"
-  const metadata = providerMetadata(state, OpenAIFreeform.metadata(item.id, custom))
+  const metadata = callMetadata(state, item, custom)
   const events: LLMEvent[] = []
   const lifecycle = Lifecycle.stepStart(state.lifecycle, events)
   const tools = ToolStream.start(state.tools, item.id, {
     id: item.call_id,
     name: item.name ?? "",
-    namespace: item.namespace,
+    namespace: callNamespace(state, item),
     input: custom ? "" : (item.arguments ?? ""),
     providerMetadata: metadata,
   })
@@ -1196,7 +1262,7 @@ const onOutputItemAdded = (state: ParserState, event: NormalizedEvent): StepResu
       LLMEvent.toolInputStart({
         id: item.call_id,
         name: item.name ?? "",
-        namespace: item.namespace,
+        namespace: callNamespace(state, item),
         providerMetadata: metadata,
       }),
       ...(opened?.events ?? []),
@@ -1312,7 +1378,7 @@ const onOutputItemDone = Effect.fnUntraced(function* (state: ParserState, item: 
   if (item.type === "function_call" || item.type === "custom_tool_call") {
     if (!item.call_id || !item.name) return [state, NO_EVENTS] satisfies StepResult
     const custom = item.type === "custom_tool_call"
-    const metadata = providerMetadata(state, OpenAIFreeform.metadata(item.id, custom))
+    const metadata = callMetadata(state, item, custom)
     const final = { custom: state.custom.get(item.name), raw: rawInput(item) }
     const input = custom ? OpenAIFreeform.fromRaw(final.custom, final.raw) : item.arguments
     const registered = state.tools[item.id] !== undefined
@@ -1322,7 +1388,7 @@ const onOutputItemDone = Effect.fnUntraced(function* (state: ParserState, item: 
       : ToolStream.start(state.tools, item.id, {
           id: item.call_id,
           name: item.name,
-          namespace: item.namespace,
+          namespace: callNamespace(state, item),
           providerMetadata: metadata,
         })
     const result = yield* ToolStream.finish(state.id, tools, item.id, input)
@@ -1336,7 +1402,7 @@ const onOutputItemDone = Effect.fnUntraced(function* (state: ParserState, item: 
             LLMEvent.toolInputStart({
               id: item.call_id,
               name: item.name,
-              namespace: item.namespace,
+              namespace: callNamespace(state, item),
               providerMetadata: metadata,
             }),
             ...finished,
@@ -1576,6 +1642,7 @@ export const initial = (request: LLMRequest, adapter: ProviderAdapter = BASE_ADA
   outputItems: {},
   message: undefined,
   reasoningItems: {},
+  inlineTools: inlineToolNames(request),
 })
 
 export const protocol = Protocol.make({
