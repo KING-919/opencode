@@ -1138,10 +1138,16 @@ describe("CodeMode public contract", () => {
       return result.ok ? (result.value as { items: Array<{ path: string }> }).items[0]?.path : undefined
     }
     // Same tools registered in a different order index identically.
-    const first = CodeMode.make({ tools: { mail: { send: simple("Send an email"), archive: simple("Archive a thread") } } })
-    const reordered = CodeMode.make({ tools: { mail: { archive: simple("Archive a thread"), send: simple("Send an email") } } })
+    const first = CodeMode.make({
+      tools: { mail: { send: simple("Send an email"), archive: simple("Archive a thread") } },
+    })
+    const reordered = CodeMode.make({
+      tools: { mail: { archive: simple("Archive a thread"), send: simple("Send an email") } },
+    })
     // Same paths and count, different descriptions: must not reuse the other index.
-    const changed = CodeMode.make({ tools: { mail: { send: simple("Archive a thread"), archive: simple("Send an email") } } })
+    const changed = CodeMode.make({
+      tools: { mail: { send: simple("Archive a thread"), archive: simple("Send an email") } },
+    })
 
     expect(await top(first, "email")).toBe("tools.mail.send")
     expect(await top(reordered, "email")).toBe("tools.mail.send")
@@ -1290,18 +1296,18 @@ describe("CodeMode public contract", () => {
     })
     const runtime = CodeMode.make({
       tools: { math: { double: transformed } },
-      hooks: { "tool.before": (call) => Effect.sync(() => void observed.push(call.input)) },
+      hooks: { "tool.after": (call) => Effect.sync(() => void observed.push(call.input)) },
     })
 
     const success = await Effect.runPromise(runtime.execute(`return await tools.math.double({ value: "21" })`))
     expect(success).toStrictEqual({ ok: true, value: 42, toolCalls: [{ name: "math.double" }] })
-    expect(observed).toStrictEqual([{ value: 21 }, 21])
+    expect(observed).toStrictEqual([21, { value: 21 }])
 
     const invalid = await Effect.runPromise(runtime.execute(`return await tools.math.double({ value: 21 })`))
     expect(invalid.ok).toBe(false)
     if (invalid.ok) return
     expect(invalid.error.kind).toBe("InvalidToolInput")
-    expect(observed).toStrictEqual([{ value: 21 }, 21])
+    expect(observed).toStrictEqual([21, { value: 21 }, { value: 21 }])
   })
 
   test("returns JSON-safe data: undefined vanishes as in JSON.stringify, and a bare undefined is null", async () => {

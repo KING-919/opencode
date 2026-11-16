@@ -450,9 +450,7 @@ describe("suspend", () => {
 
   test("the snapshot codec does not import Effect", async () => {
     for (const file of ["codec.ts", "snapshot.ts"]) {
-      expect(await Bun.file(path.join(import.meta.dir, "../src/snapshot", file)).text()).not.toMatch(
-        /from "effect"/,
-      )
+      expect(await Bun.file(path.join(import.meta.dir, "../src/snapshot", file)).text()).not.toMatch(/from "effect"/)
     }
   })
 })
@@ -510,9 +508,7 @@ describe("resume", () => {
     )
     const saved = suspendedOf(await Effect.runPromise(long.suspend))
     expect(
-      await Effect.runPromise(
-        background(CodeMode.make({ tools: { step: step2.tool } }).resume(saved.state)).result,
-      ),
+      await Effect.runPromise(background(CodeMode.make({ tools: { step: step2.tool } }).resume(saved.state)).result),
     ).toMatchObject({ ok: true, truncated: true })
   })
 
@@ -587,9 +583,7 @@ describe("resume", () => {
       [extension],
     )
     const outcome = await Effect.runPromise(
-      background(
-        CodeMode.make({ tools: { step: step.tool }, extensions: [extension] }).resume(suspended.state),
-      ).result,
+      background(CodeMode.make({ tools: { step: step.tool }, extensions: [extension] }).resume(suspended.state)).result,
     )
     expect(outcome).toMatchObject({
       ok: true,
@@ -647,8 +641,7 @@ describe("resume", () => {
       }`
     const { step, suspended } = await suspendAt(code)
     const outcome = await Effect.runPromise(
-      background(CodeMode.make({ tools: { step: step.tool } }).resume(CodeMode.toBytes(suspended.state)))
-        .result,
+      background(CodeMode.make({ tools: { step: step.tool } }).resume(CodeMode.toBytes(suspended.state))).result,
     )
     expect(outcome).toMatchObject({
       ok: true,
@@ -714,6 +707,39 @@ describe("resume", () => {
 })
 
 describe("idempotent and durable tools", () => {
+  test("tool.before repairs an idempotent call again on resume, from the input the program wrote", async () => {
+    const read = idempotentManual()
+    const seen: Array<[string, unknown]> = []
+    const runtime = () =>
+      CodeMode.make({
+        tools: { read: read.tool },
+        hooks: {
+          "tool.before": (call) =>
+            Effect.sync(() => {
+              seen.push([call.key, call.input])
+              call.input = { value: 21 }
+            }),
+        },
+      })
+    const run = background(runtime().program(`return await tools.read({ value: "21" })`, undefined, { runId: "fix" }))
+    await read.called()
+    const saved = suspendedOf(await Effect.runPromise(run.suspend))
+    read.reset()
+    const resumed = background(runtime().resume(CodeMode.toBytes(saved.state)))
+    await read.called()
+    read.attempts[1]!.answer(21)
+    expect(await Effect.runPromise(resumed.result)).toEqual({
+      ok: true,
+      value: { value: 21 },
+      toolCalls: [{ name: "read" }],
+    })
+    expect(seen).toEqual([
+      ["fix:0", { value: "21" }],
+      ["fix:0", { value: "21" }],
+    ])
+    expect(read.attempts.map((attempt) => attempt.input)).toEqual([21, 21])
+  })
+
   test("an idempotent tool in flight can be suspended, is interrupted without firing after, and reruns on resume with the same key", async () => {
     const read = idempotentManual()
     const events: Array<string> = []
@@ -1295,9 +1321,9 @@ describe("idempotent and durable tools", () => {
     })
     const toolSets: ReadonlyArray<Record<string, Tool.Tool>> = [{}, { job: plainTool }, { job: read.tool }]
     for (const tools of toolSets) {
-      expect(
-        (await refusal(CodeMode.make({ tools }).resume(suspendedWhileStarted.state))).message,
-      ).toContain("cannot resume because that tool is no longer a durable tool")
+      expect((await refusal(CodeMode.make({ tools }).resume(suspendedWhileStarted.state))).message).toContain(
+        "cannot resume because that tool is no longer a durable tool",
+      )
     }
 
     // Complete `job` while `read` is still running: `job` moves to the inbox with its `data` cleared.
@@ -1514,8 +1540,7 @@ describe("extension snapshot hooks", () => {
     const other = Extension.make({ name: "other", globals: extension.globals, snapshot: extension.snapshot })
     for (const extensions of [[], [unhooked], [other]]) {
       expect(
-        (await refusal(CodeMode.make({ tools: { job: jobs.tool }, extensions }).resume(suspended.state)))
-          .message,
+        (await refusal(CodeMode.make({ tools: { job: jobs.tool }, extensions }).resume(suspended.state))).message,
       ).toBe("This state was saved by a runtime with other host globals (extensions); resume it with the same ones.")
     }
   })
