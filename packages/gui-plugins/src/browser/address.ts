@@ -1,4 +1,4 @@
-import { destinationOrigin } from "./policy"
+import { destinationOrigin, localAddress } from "./policy"
 
 /** Where text that is not an address goes. Shared with the system browser's default so results look familiar. */
 const SEARCH = "https://www.google.com/search?q="
@@ -24,6 +24,8 @@ export function searches(input: string) {
   const value = input.trim()
 
   if (!value || /^about:\S*$/i.test(value)) return false
+
+  if (localAddress(value) || value.startsWith("//")) return false
 
   if (/^[a-z][a-z\d+.-]*:\/\//i.test(value)) return !URL.canParse(value)
 
@@ -53,6 +55,7 @@ export function addressParts(url: string) {
  * - `local`: HTTP on a loopback host, which resolves on the machine running the server.
  * - `insecure`: HTTP elsewhere.
  * - `file`: a workspace file.
+ * - `workspace`: a file read by the session's server, not from the desktop's disk.
  */
 export function connection(url: string) {
   if (!URL.canParse(url)) return
@@ -62,6 +65,8 @@ export function connection(url: string) {
 
   if (parsed.protocol === "file:") return "file"
 
+  if (parsed.protocol === "workspace:") return "workspace"
+
   if (parsed.protocol !== "http:") return
 
   return loopback(parsed.hostname) ? "local" : "insecure"
@@ -70,4 +75,14 @@ export function connection(url: string) {
 /** Whether a host names this machine; for a remote server that is the server's machine, not the user's. */
 export function loopback(hostname: string) {
   return /^(?:localhost|127(?:\.\d{1,3}){3}|\[::1\]|::1)$/i.test(hostname) || hostname.endsWith(".localhost")
+}
+
+/** A file never goes to the default application. Main resolves the tab's workspace again before revealing it. */
+export function externalAction(url: string, local: boolean) {
+  if (!URL.canParse(url)) return
+  const parsed = new URL(url)
+
+  if (parsed.protocol === "file:") return local && !parsed.hostname ? "reveal" : undefined
+
+  if (destinationOrigin(url) && (local || !loopback(parsed.hostname))) return "browser"
 }

@@ -3,44 +3,111 @@ export * as BrowserFiles from "./files.js"
 import { Browser } from "./rpc.js"
 import { Tool } from "@opencode/schema/tool"
 import { Effect } from "effect"
+import type { Context } from "@opencode/plugin/effect/plugin"
+import { openContained } from "@opencode/util/contained-file"
+import { FileVerificationError } from "@opencode/util/file-verification"
+import { FSUtil } from "@opencode/util/fs-util"
+import { Global } from "@opencode/util/global"
+import { workspaceTarget } from "./workspace.js"
+import { previewPath } from "./preview-path.js"
+import { realpath, stat } from "node:fs/promises"
+import { basename, dirname, extname, join, parse, relative, resolve } from "node:path"
+import { createHash } from "node:crypto"
+import { fileURLToPath } from "node:url"
+
+// Match core FileAccess's lexical resources; the plugin SDK exposes permission.assert, not FileAccess.Service.
+export const authorize = Effect.fn("BrowserFiles.authorize")(function* (
+  ctx: Pick<Context, "permission" | "location">, tool: Tool.Context, action: "read" | "edit", paths: readonly string[],
+) {
+  if (ctx.location.workspaceID) return yield* new Tool.Error({ message: "Browser file transfers require a server-local workspace." })
+  const directory = ctx.location.directory
+  const project = ctx.location.project.directory
+  const outside = paths.filter((file) => !FSUtil.contains(directory, file) && (project === parse(project).root || !FSUtil.contains(project, file)))
+  const invocation = { sessionID: tool.sessionID, agent: tool.agent, source: { type: "tool" as const, messageID: tool.messageID, id: tool.id }, metadata: { input: { paths } } }
+  if (outside.length) yield* ctx.permission.assert({ ...invocation, action: "external_directory", resources: [...new Set(outside.map((file) => join(dirname(file), "*").replaceAll("\\", "/")))], save: [] })
+  const resources = paths.map((file) => (outside.includes(file) ? file : relative(directory, file) || ".").replaceAll("\\", "/"))
+  yield* ctx.permission.assert({ ...invocation, action, resources, save: outside.length || resources.some((r) => /[*?]/.test(r)) ? [] : resources })
+})
+
+export function uploadPath(directory: string, input: string) {
+  const path = FSUtil.windowsPath(input)
+  return resolve(directory, path === "~" ? Global.Path.home : /^~\//.test(path) || (process.platform === "win32" && path.startsWith("~\\")) ? join(Global.Path.home, path.slice(2)) : path)
+}
+
+export const physical = (paths: readonly string[]) => Effect.tryPromise({ try: () => Promise.all(paths.map((path) => realpath(path))), catch: (error) => failure("read", error) })
 
 // Files cross machines as bytes. Only this endpoint interprets its local paths.
-export const read = Effect.fn("BrowserFiles.read")((paths: readonly string[], directory: string) =>
+export const read = Effect.fn("BrowserFiles.read")((paths: readonly string[], names: readonly string[]) =>
   Effect.tryPromise({
     try: async () => {
-      const { open } = await import("node:fs/promises")
-      const { resolve, basename, extname } = await import("node:path")
-      const files = await Promise.all(
-        paths.map(async (input) => {
-          const file = await open(resolve(directory, input), "r")
+      const files: Browser.File[] = []
+      let remaining = Browser.MAX_FILE_BYTES
+      for (const [index, input] of paths.entries()) {
+          const opened = await openContained(dirname(input), basename(input))
+          if (!opened) throw new Error("Upload paths must name regular files.")
+          const file = opened.file
           try {
-            const stat = await file.stat()
-            if (!stat.isFile())
-              throw new Error("Upload paths must name files, not directories. Select a server-local file.")
-            if (stat.size > Browser.MAX_FILE_BYTES)
-              throw new Error(
-                `Upload is ${stat.size} bytes; the limit is ${Browser.MAX_FILE_BYTES} bytes (5 MiB). Select a smaller file; do not retry the same upload.`,
-              )
-            return {
-              id: Browser.FileID.make(`file_${crypto.randomUUID()}`),
-              name: basename(input),
-              mime: types[extname(input).toLowerCase()] ?? "application/octet-stream",
-              data: new Uint8Array(await file.readFile()),
+            if (opened.path !== input) throw new Error("The upload target changed after permission was checked.")
+            if (opened.size > remaining) throw new Error("The selected upload files exceed 5 MiB in total.")
+            const data = Buffer.alloc(opened.size)
+            let offset = 0
+            while (offset < data.length) {
+              const { bytesRead } = await file.read(data, offset, data.length - offset, offset)
+              if (!bytesRead) throw new Error("The upload file changed while it was being read.")
+              offset += bytesRead
             }
+            remaining -= data.length
+            const name = basename(names[index] ?? input)
+            files.push({
+              id: Browser.FileID.make(`file_${crypto.randomUUID()}`),
+              name,
+              mime: types[extname(name).toLowerCase()] ?? "application/octet-stream",
+              data,
+            })
           } finally {
             await file.close()
           }
-        }),
-      )
-      if (files.reduce((size, file) => size + file.data.byteLength, 0) > Browser.MAX_FILE_BYTES)
-        throw new Error(
-          "The selected upload files exceed 5 MiB in total. Send fewer or smaller files; splitting them into one batch does not bypass the total limit.",
-        )
+      }
       return files
     },
     catch: (error) => failure("read", error),
   }),
 )
+
+/** Resolve and authorize the exact entry. A missing agent path must not trigger a search of unapproved directories. */
+export const locate = Effect.fn("BrowserFiles.locate")(function* (path: string, directory: string, approve: (absolute: string) => Effect.Effect<void, Tool.Error>) {
+  const value = path.trim()
+  if (address(value) && !/^file:/i.test(value)) return undefined
+  const invalid = () => new Tool.Error({ metadata: { code: "unresolved_path" }, message: "browser.preview could not resolve this file inside the workspace." })
+  const url = yield* Effect.try({ try: () => /^file:/i.test(value) ? new URL(value) : undefined, catch: invalid })
+  if (url?.hostname) return { absolute: value, found: false, directory: false, outside: true }
+  const local = yield* Effect.try({ try: () => (url ? fileURLToPath(url) : value).replaceAll("\\", "/"), catch: invalid })
+  const plain = local.replace(/(?:#L\d+(?:C\d+)?(?:-L?\d+(?:C\d+)?)?|:\d+(?::\d+)?(?:-\d+(?::\d+)?)?:?)$/i, "")
+  const absolute = resolve(directory, plain)
+  const missing = { absolute, found: false, directory: false }
+  // Outside and invalid names can be refused lexically, without querying the filesystem or prompting to read them.
+  if (!FSUtil.contains(directory, absolute)) return { ...missing, outside: true }
+  const entry = relative(directory, absolute).replaceAll("\\", "/")
+  if (entry && !previewPath(entry, process.platform === "win32")) return { ...missing, invalid: true }
+  yield* approve(absolute)
+  const target = yield* Effect.tryPromise({ try: () => workspaceTarget(absolute, [directory]), catch: cause => cause instanceof Error && "code" in cause && (cause.code === "ENOENT" || cause.code === "ENOTDIR") ? "missing" as const : invalid() }).pipe(
+    Effect.catchIf(error => error === "missing", () => Effect.succeed(null)),
+  )
+  if (target === null) return missing
+  if (!target) return { ...missing, outside: true }
+  // The physical file, named under the workspace as the session spells it: a workspace reached through a symlink
+  // (macOS's /var is /private/var) keeps its own path, and only a link inside it to another entry needs approval.
+  const root = yield* Effect.tryPromise({ try: () => realpath(directory), catch: invalid })
+  const physical = resolve(directory, relative(root, target))
+  if (physical !== absolute) yield* approve(physical)
+  const info = yield* Effect.tryPromise({ try: () => stat(target), catch: invalid })
+  return { absolute: physical, found: info.isFile(), directory: info.isDirectory() }
+})
+
+/** Whether a preview path is an address with a scheme, such as https:, skill: or file:. A drive letter is no scheme. */
+export function address(path: string) {
+  return /^[a-z][a-z\d+.-]+:/i.test(path.trim())
+}
 
 const types: Record<string, string> = {
   ".txt": "text/plain",
@@ -58,7 +125,17 @@ const types: Record<string, string> = {
   ".gz": "application/gzip",
 }
 
-export const save = Effect.fn("BrowserFiles.save")((files: readonly Browser.File[]) =>
+/** A session owns one private cache tree. Neither file names nor session IDs are interpreted as directory paths. */
+export function exportRoot(sessionID: string) {
+  return join(Global.Path.cache, "browser-exports", createHash("sha256").update(sessionID).digest("hex"))
+}
+
+export function exportPaths(files: readonly Browser.File[], root: string) {
+  const directory = join(root, crypto.randomUUID())
+  return { directory, paths: files.map((file, index) => join(directory, String(index), captureName(file.name))) }
+}
+
+export const save = Effect.fn("BrowserFiles.save")((files: readonly Browser.File[], plan: ReturnType<typeof exportPaths>) =>
   Effect.tryPromise({
     try: async () => {
       if (files.length === 0) return []
@@ -66,16 +143,14 @@ export const save = Effect.fn("BrowserFiles.save")((files: readonly Browser.File
         throw new Error(
           "Capture files exceed the 5 MiB total transfer limit. Use a smaller screenshot, a shorter trace/profile, or a smaller page for heap capture; do not retry the identical capture.",
         )
-      const { mkdtemp, mkdir, writeFile } = await import("node:fs/promises")
-      const { join } = await import("node:path")
-      const { tmpdir } = await import("node:os")
-      const directory = await mkdtemp(join(tmpdir(), "opencode-browser-"))
+      const { mkdir, writeFile } = await import("node:fs/promises")
+      await mkdir(dirname(plan.directory), { recursive: true, mode: 0o700 })
+      await mkdir(plan.directory, { mode: 0o700 })
       return Promise.all(
         files.map(async (file, index) => {
-          const name = captureName(file.name)
-          await mkdir(join(directory, String(index)))
-          const path = join(directory, String(index), name)
-          await writeFile(path, file.data, { flag: "wx" })
+          const path = plan.paths[index]!
+          await mkdir(dirname(path), { mode: 0o700 })
+          await writeFile(path, file.data, { flag: "wx", mode: 0o600 })
           return { id: file.id, name: file.name, mime: file.mime, bytes: file.data.byteLength, path }
         }),
       )
@@ -93,6 +168,8 @@ export function captureName(name: string) {
 }
 
 function failure(operation: "read" | "save", error: unknown) {
+  if (error instanceof FileVerificationError)
+    return new Tool.Error({ message: error.message, metadata: { code: error._tag } })
   const detail = error instanceof Error ? error.message.slice(0, 400) : String(error).slice(0, 400)
   const code =
     error instanceof Error && "code" in error && typeof error.code === "string" && !detail.startsWith(error.code)

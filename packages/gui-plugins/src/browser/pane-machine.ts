@@ -84,7 +84,7 @@ export type BindingEvent =
   | { readonly type: "register.timed-out" }
   /** The window navigated or was destroyed. */
   | { readonly type: "owner.closed" }
-  /** The window closed the binding; its saved tabs are forgotten. */
+  /** An explicit session deletion (not disposal of a window, location or IPC binding). */
   | { readonly type: "client.closed" }
   | { readonly type: "pane.disposed" }
   | { readonly type: "request.started"; readonly requestID: string }
@@ -93,6 +93,7 @@ export type BindingEvent =
   | { readonly type: "request.finished"; readonly requestID: string }
   /** A page for `tabID` was created as `attempt`, the binding's `nextAttempt`. */
   | { readonly type: "tab.opened"; readonly tabID: Browser.TabID; readonly attempt: number; readonly tab: Browser.Tab }
+  | { readonly type: "restore.refused"; readonly tabID: Browser.TabID; readonly reason: "browser.restore.outside" | "browser.restore.refused" }
   | {
       readonly type: "tab.published"
       readonly tabID: Browser.TabID
@@ -108,6 +109,7 @@ export type BindingEvent =
       readonly tab?: Browser.Tab
     }
   | { readonly type: "tab.focused"; readonly tabID: Browser.TabID }
+  | { readonly type: "tab.restricted"; readonly tabID: Browser.TabID; readonly url: string }
   | { readonly type: "tab.closed"; readonly tabID: Browser.TabID }
 
 export type PaneMachineEvent =
@@ -202,10 +204,20 @@ export function transitionPane(state: PaneState, event: PaneMachineEvent): PaneT
 
   if (event.type === "registered") {
     if (state.bindings.has(event.binding)) return { state, effects: [] }
+    // A reconnect can arrive before the old attach stream observes the disconnect. The window owns one
+    // native pane for this session, even when the renderer lost the IPC that would normally close it.
+    const bindings = new Map(state.bindings)
+    const effects: PaneEffect[] = []
+
+    for (const [id, old] of bindings) {
+      if (old.window !== event.window || old.storageKey !== event.storageKey) continue
+      bindings.delete(id)
+      effects.push(...close(old, "browser.pane.replaced", false).effects)
+    }
 
     return {
-      state: { status: "active", bindings: new Map(state.bindings).set(event.binding, createConnecting(event)) },
-      effects: [{ type: "start-timer", binding: event.binding, ms: REGISTER_TIMEOUT_MS }],
+      state: { status: "active", bindings: bindings.set(event.binding, createConnecting(event)) },
+      effects: [...effects, { type: "start-timer", binding: event.binding, ms: REGISTER_TIMEOUT_MS }],
     }
   }
 
@@ -228,7 +240,7 @@ export function transitionBinding(state: BindingState, event: BindingEvent): Bin
   if (state.status === "closed") return { state, effects: [] }
   const reason = closeReason(state, event)
 
-  if (reason) return close(state, reason, event.type === "client.closed" || reason === "browser.pane.missing")
+  if (reason) return close(state, reason, event.type === "client.closed")
 
   if (event.type === "control.unrecognized")
     return {
@@ -291,7 +303,7 @@ function close(state: ActiveBinding, reason: PaneCloseReason, forget: boolean): 
     binding: state.binding,
     event: {
       type: "state",
-      state: reason === "browser.pane.suspended" ? selectInventory(state) : null,
+      state: reason === "browser.pane.suspended" || (!forget && state.tabs.size > 0 && reason === "browser.pane.registration.closed") ? selectInventory(state) : null,
       error: reason,
     },
   })
@@ -361,6 +373,15 @@ function transitionAttached(state: AttachedBinding, event: BindingEvent): Bindin
     }
   }
 
+  if (event.type === "restore.refused") {
+    const slot = state.tabs.get(event.tabID)
+
+    if (slot?.status !== "unloaded" || slot.tab.loadError === event.reason) return { state, effects: [] }
+    const tabs = new Map(state.tabs).set(event.tabID, { ...slot, tab: { ...slot.tab, loading: false, loadError: event.reason } })
+
+    return publish({ ...state, tabs })
+  }
+
   if (event.type === "tab.closed") {
     const closed = state.tabs.get(event.tabID)
 
@@ -370,6 +391,17 @@ function transitionAttached(state: AttachedBinding, event: BindingEvent): Bindin
     const focusedTabID = state.focusedTabID === event.tabID ? (tabs.keys().next().value ?? null) : state.focusedTabID
 
     return withoutTab({ ...state, tabs, focusedTabID }, event.tabID, closed, undefined)
+  }
+
+  if (event.type === "tab.restricted") {
+    const slot = state.tabs.get(event.tabID)
+
+    if (slot?.status !== "live") return { state, effects: [] }
+    // Keep the logical tab and its pending command, never its old DOM, opener, history or captured responses.
+    const tab = { ...slot.tab, title: "", url: event.url, canGoBack: false, canGoForward: false, generation: slot.tab.generation + 1 }
+
+    return {state: {...state, tabs: new Map(state.tabs).set(event.tabID, {status:"unloaded", tab})},
+      effects: [{type:"release-pages", binding:state.binding, attempts:[slot.attempt]}]}
   }
 
   if (event.type !== "tab.published" && event.type !== "tab.crashed") return { state, effects: [] }
@@ -468,7 +500,7 @@ function createConnecting(event: Extract<PaneMachineEvent, { readonly type: "reg
       {
         status: "unloaded",
         // A restored page's first navigation takes the next generation.
-        tab: { ...tab, loading: false, canGoBack: false, canGoForward: false, generation: tab.generation + 1 },
+        tab: { id: tab.id, url: tab.url, title: tab.title, loading: false, canGoBack: false, canGoForward: false, generation: tab.generation + 1 },
       },
     ]),
   )

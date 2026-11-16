@@ -20,6 +20,7 @@ function fixture(reject?: Error) {
   const events: PaneEvent[] = []
 
   const client: Client = {
+    forget: async () => undefined,
     register: async (input) => {
       registered.push(input)
 
@@ -27,6 +28,9 @@ function fixture(reject?: Error) {
     },
     load: async () => undefined,
     command: async () => undefined,
+    find: async () => undefined,
+    notice: async () => undefined,
+    answer: async () => undefined,
     inspect: async () => undefined,
     highlight: async (input) => {
       highlights.push(input)
@@ -34,6 +38,7 @@ function fixture(reject?: Error) {
     zoom: async () => undefined,
     site: async () => ({ cookies: 0 }),
     clearSite: async () => undefined,
+    reveal: async () => undefined,
     close: async (input) => {
       closed.push(input.binding)
     },

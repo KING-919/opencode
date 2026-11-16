@@ -12,7 +12,7 @@ import {
   untrack,
 } from "solid-js"
 import { Button } from "@opencode/ui/button"
-import { Command, createKeyed, LinkHandler, MenuItem, Style, type Plugin } from "@opencode/plugin/gui"
+import { Command, createKeyed, LinkHandler, MenuItem, SettingsPage, Style, type Plugin } from "@opencode/plugin/gui"
 import { BuiltinCommand, BuiltinPanel, onIdle, type BuiltinPanelTab } from "@opencode/plugin/gui/builtin"
 import { Browser } from "@opencode/plugin/gui/browser"
 import type definition from "./index"
@@ -28,6 +28,8 @@ import {
   type BrowserModelEvent,
 } from "./model-machine"
 import { PageIcon } from "./page-icon"
+import { artifactLink, artifactWebURL } from "./artifact-link"
+import { remotePath, workspacePrefix } from "./remote-address"
 import barStyles from "./bar.css?inline"
 import commentStyles from "./comment.css?inline"
 import tabStyles from "./tabs.css?inline"
@@ -56,8 +58,44 @@ const setup: Plugin.Setup<typeof definition> = (ctx) => {
     }
   })
 
+  // Artifacts have a relative API link, not a workspace path. An external provider's ordinary web URL falls through.
+  ctx.add(LinkHandler, {
+    priority: 6,
+    match: (link) => link.origin === undefined && !!link.session && !!artifactLink(link.href, link.session.server.url),
+    open(link) {
+      const session = link.session
+      const url = session && artifactLink(link.href, session.server.url)
+
+      if (session && url) {
+        if (ctx.app.platform !== "desktop") {
+          const external = artifactWebURL(url, session.server.url)
+
+          if (external) return ctx.system.openExternal(external)
+        }
+
+        const pane = model()
+
+        if (pane?.available(session)) return pane.openURL(session, url)
+      }
+
+      ctx.toast.show({ variant: "error", title: ctx.t("artifact.unavailable") })
+    },
+  })
+
   // The native pane is a desktop feature.
   if (ctx.app.platform !== "desktop") return
+  ctx.add(LinkHandler, {
+    priority: 6,
+    match: (link) => link.origin === undefined && link.href.startsWith("workspace://"),
+    open(link) {
+      const session = link.session
+      const pane = model()
+
+      if (session?.id && !session.server.builtin && remotePath(link.href, workspacePrefix(session.id)) && pane?.available(session))
+        return pane.openURL(session, link.href)
+      ctx.toast.show({ variant: "error", title: ctx.t("refused.workspace") })
+    },
+  })
   // Tab trigger styles render with the strip, before the pane chunk loads.
   ctx.add(Style, tabStyles)
   ctx.add(Style, commentStyles)
@@ -143,6 +181,38 @@ const setup: Plugin.Setup<typeof definition> = (ctx) => {
       run: pane.reload,
     }
   })
+
+  ctx.add(Command, (): Command | undefined => {
+    const pane = model()?.pane()
+
+    if (!pane) return undefined
+
+    return {
+      id: "find",
+      title: ctx.t("find.open"),
+      group: ctx.t("command.category.view"),
+      bind: "mod+f",
+      scope: "#browser-panel",
+      editable: true,
+      enabled: pane.visible() && pane.inspectable(),
+      run: pane.find,
+    }
+  })
+
+  for (const direction of ["next", "previous"] as const) {
+    const shift = direction === "previous" ? "shift+" : ""
+    ctx.add(Command, (): Command | undefined => {
+      const pane = model()?.pane()
+
+      if (!pane) return
+
+      return {
+        id: `find.${direction}`, title: ctx.t(`find.${direction}`), group: ctx.t("command.category.view"),
+        bind: mac ? `mod+${shift}g` : `mod+${shift}g,${shift}f3`, scope: "#browser-panel", editable: true,
+        enabled: pane.visible() && pane.inspectable(), run: () => pane.findMatch(direction),
+      }
+    })
+  }
 
   // The system browser's address shortcut, in the pane and, forwarded like mod+t and mod+w, from a page with focus.
   // Ctrl+L focuses the composer outside the pane on Windows and Linux.
@@ -252,6 +322,58 @@ const setup: Plugin.Setup<typeof definition> = (ctx) => {
     },
   })
 
+  // A web link the user clicked in a session opens beside it, in the profile where they are signed in. While the pane
+  // cannot open it, or the user turned this off, the link goes on to the system browser.
+  ctx.add(LinkHandler, {
+    priority: 5,
+    match: (link) =>
+      link.origin === undefined &&
+      /^https?:\/\//i.test(link.href) &&
+      ctx.stores.preferences.value.links &&
+      !!link.session &&
+      !!model()?.available(link.session),
+    open(link) {
+      if (link.session) model()?.openURL(link.session, link.href)
+    },
+  })
+
+  const SettingsView = lazy(() => import("./settings"))
+
+  ctx.add(SettingsPage, {
+    id: "browser",
+    icon: "globe",
+    get title() {
+      return ctx.t("settings.title")
+    },
+    get entries() {
+      return [
+        { id: "settings-browser-links", title: ctx.t("settings.links.title"), keywords: "links open system browser" },
+        {
+          id: "settings-browser-remote",
+          title: ctx.t("settings.remote.title"),
+          keywords: "remote server sign in cookies share",
+        },
+        { id: "settings-browser-cookies", title: ctx.t("settings.cookies.title"), keywords: "cookies sign out" },
+        {
+          id: "settings-browser-import",
+          title: ctx.t("settings.import.title"),
+          keywords: "import cookies chrome edge firefox safari helium arc brave sign in",
+        },
+        { id: "settings-browser-extensions", title: ctx.t("settings.extensions.title"), keywords: "extensions" },
+        {
+          id: "settings-browser-sites",
+          title: ctx.t("settings.sites.title"),
+          keywords: "site permissions camera microphone location notifications clipboard",
+        },
+      ]
+    },
+    render: () => (
+      <Suspense>
+        <SettingsView />
+      </Suspense>
+    ),
+  })
+
   // Stable tab objects with live labels, so title and URL changes never remount a trigger.
   const tabs = new Map<string, Map<string, BuiltinPanelTab>>()
 
@@ -273,6 +395,10 @@ const setup: Plugin.Setup<typeof definition> = (ctx) => {
         <div class="flex items-center gap-1.5">
           <PageIcon icon={icon()} />
           <span class="max-w-40 truncate">{text()}</span>
+          {/* A tab behind another waits on the user: a dialog, a sign-in or a site's request. */}
+          <Show when={model()?.asking({ key: session }, id)}>
+            <span role="img" aria-label={ctx.t("prompt.tab")} class="size-1.5 shrink-0 rounded-full bg-v2-icon-icon-accent" />
+          </Show>
         </div>
       ),
       // Listed only to hold the restored selection until the desktop's first inventory names the tab, or the model

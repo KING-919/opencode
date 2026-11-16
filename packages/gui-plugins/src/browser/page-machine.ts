@@ -64,6 +64,7 @@ export type DocumentEvent =
       readonly code: number
       readonly description: string
       readonly url: string
+      readonly preview?: string
       readonly isMainFrame: boolean
     }
   | { readonly type: "navigation.in-page"; readonly url: string; readonly title: string; readonly isMainFrame: boolean }
@@ -177,6 +178,11 @@ export function documentGeneration(state: DocumentState) {
   return state.status === "closed" ? 0 : state.generation
 }
 
+/** Whether a main-frame navigation started that has not committed, failed, or stopped. */
+export function isNavigationPending(state: DocumentState) {
+  return state.status !== "closed" && state.pending !== undefined
+}
+
 /** Whether the native surface holds a document worth exposing over the themed background. */
 export function documentVisible(state: DocumentState) {
   return state.status === "loaded" && state.revealed
@@ -253,12 +259,17 @@ function failed(state: Open, event: Extract<DocumentEvent, { type: "navigation.f
   // A failure with a navigation in flight commits an error page in place of the document. One without, after the
   // document committed, fails that document, which keeps its generation.
   const replaced = state.pending !== undefined || state.status === "restoring"
+  // A failed preview never supplied a validated file. The error document has no external destination.
+  const local = /^(?:oc-preview|file):/i.test(event.url)
+  // A previous commit (or stored restore) is evidence; navigation.started alone is not. In particular never
+  // promote a failed virtual History API entry or a raw file: URL to an address the OS could reveal.
+  const retained = local && event.preview === state.url
 
   const next: Open = {
     status: "failed",
     generation: replaced && state.status !== "restoring" ? state.generation + 1 : state.generation,
-    url: event.url,
-    title: state.title,
+    url: retained ? state.url : local ? "about:blank" : event.url,
+    title: local && !retained ? "" : state.title,
     origin: state.origin,
     icon: state.icon,
     iconAttempt: state.iconAttempt,

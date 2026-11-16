@@ -25,7 +25,125 @@ export const PaneElement = Schema.Struct({
 
 export type PaneElement = typeof PaneElement.Type
 
+const FindAction = Schema.Union([
+  Schema.Struct({ type: Schema.Literals(["open", "close", "previous", "next"]) }),
+  Schema.Struct({ type: Schema.Literal("query"), query: detail(4096) }),
+])
+
+export type FindAction = typeof FindAction.Type
+
+const FindView = Schema.Struct({
+  query: detail(4096),
+  result: Schema.NullOr(Schema.Struct({ active: Schema.Int, total: Schema.Int })),
+})
+
+export type FindView = typeof FindView.Type
+
+const RefusalNotice = Schema.Union([
+  Schema.Struct({ reason: Schema.Literals(["browser.address.credentials", "browser.address.workspace", "browser.address.web", "browser.preview.restricted", "browser.preview.agentRestricted"]) }),
+  Schema.Struct({ reason: Schema.Literal("external"), target: text(2048), action: Schema.Literals(["open", "copy"]) }),
+  Schema.Struct({ reason: Schema.Literal("popup"), target: text(16384), action: Schema.optionalKey(Schema.Literal("tab")) }),
+])
+
+export type RefusalNotice = typeof RefusalNotice.Type
+
+/**
+ * Who asks, as the pane names it: a web site by its host (ASCII, punycode for international names, shortened at the
+ * start when long), a local file, or a page with no origin to name. `embedded` is a frame of another origin than the
+ * tab's page.
+ */
+const PromptSite = Schema.Struct({
+  kind: Schema.Literals(["web", "file", "page"]),
+  host: detail(80),
+  embedded: Schema.Boolean,
+})
+
+export type PromptSite = typeof PromptSite.Type
+
+/** The longest page-supplied text a prompt shows: a dialog's message, its prompt's default value, a sign-in realm. */
+export const PROMPT_TEXT_MAX = 2_000
+
+/** The longest user name or password a sign-in sends; the form stops there, so the answer always passes. */
+export const SIGN_IN_TEXT_MAX = 1_024
+
+/**
+ * What a tab waits on the user for, which only the window shows and only the user answers. `waiting` counts the
+ * others behind it. `focus` is true when the prompt takes the keyboard as it shows: a dialog in the tab in front of a
+ * focused window, a bar only from its page. Each kind:
+ * - `dialog`: the page's `alert`, `confirm` or `prompt`; `stop` offers to stop the page's dialogs.
+ * - `leave`: the page asks to confirm before the user leaves it.
+ * - `permission`: a site asks for features; `remember` offers to keep the decision in the profile (`kept`) or for a
+ *   remote server until the app quits (`session`); `agent` says the agent drives the tab, so the answer is for this
+ *   request only.
+ * - `auth`: a site asks for a user name and password; `failed` when it refused the last ones.
+ * - `system`: the system's privacy settings blocked a device the user allowed.
+ */
+export const PromptView = Schema.Struct({
+  id: Schema.Int,
+  /** How many times the page asked for what shows: a repeat shows it anew, so its input protection starts over. */
+  asked: Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)),
+  waiting: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  focus: Schema.Boolean,
+  /** The page held the keyboard as the prompt showed: it gets it back afterwards, so the window restores nothing. */
+  page: Schema.Boolean,
+  ask: Schema.Union([
+    Schema.Struct({
+      kind: Schema.Literal("dialog"),
+      dialog: Schema.Literals(["alert", "confirm", "prompt"]),
+      site: PromptSite,
+      message: detail(PROMPT_TEXT_MAX),
+      value: detail(PROMPT_TEXT_MAX),
+      stop: Schema.Boolean,
+    }),
+    Schema.Struct({ kind: Schema.Literal("leave") }),
+    Schema.Struct({
+      kind: Schema.Literal("permission"),
+      site: PromptSite,
+      permissions: Schema.Array(Schema.Literals(["camera", "microphone", "location", "notifications", "clipboard-read"])),
+      remember: Schema.Literals(["kept", "session", "none"]),
+      agent: Schema.Boolean,
+      /** macOS asks next, once the user allows the site: it has not asked about the device yet. */
+      system: Schema.Boolean,
+    }),
+    Schema.Struct({ kind: Schema.Literal("auth"), host: text(80), realm: detail(256), failed: Schema.Boolean }),
+    Schema.Struct({
+      kind: Schema.Literal("system"),
+      device: Schema.Literals(["camera", "microphone"]),
+      platform: Schema.Literals(["darwin", "win32", "other"]),
+    }),
+  ]),
+})
+
+export type PromptView = typeof PromptView.Type
+
+/**
+ * The user's answer to the prompt `id` of a kind. `dismiss` closes it with the page's default: a permission is denied
+ * this time and nothing is kept, a sign-in is cancelled. The sign-in's user name and password go only to Chromium.
+ */
+const PromptAnswer = Schema.Union([
+  Schema.Struct({
+    kind: Schema.Literal("dialog"),
+    accept: Schema.Boolean,
+    text: detail(PROMPT_TEXT_MAX),
+    stop: Schema.Boolean,
+  }),
+  Schema.Struct({ kind: Schema.Literal("leave"), leave: Schema.Boolean }),
+  Schema.Struct({
+    kind: Schema.Literal("permission"),
+    allow: Schema.Boolean,
+    remember: Schema.Boolean,
+  }),
+  Schema.Struct({ kind: Schema.Literal("auth"), username: detail(SIGN_IN_TEXT_MAX), password: detail(SIGN_IN_TEXT_MAX) }),
+  Schema.Struct({ kind: Schema.Literal("dismiss") }),
+])
+
+export type PromptAnswer = typeof PromptAnswer.Type
+
 export const PaneEvent = Schema.Union([
+  Schema.Struct({ type: Schema.Literal("find"), tabID: Browser.TabID, view: Schema.NullOr(FindView) }),
+  Schema.Struct({ type: Schema.Literal("refusal"), tabID: Browser.TabID, notice: RefusalNotice, token: text(128) }),
+  // What the tab waits on the user for; null once nothing waits.
+  Schema.Struct({ type: Schema.Literal("prompt"), tabID: Browser.TabID, prompt: Schema.NullOr(PromptView) }),
   Schema.Struct({ type: Schema.Literal("focus"), tabID: Browser.TabID }),
   Schema.Struct({ type: Schema.Literal("preview"), path: text(2_048) }),
   Schema.Struct({
@@ -107,6 +225,10 @@ export const BrowserPane = Ipc.define({
     // Creates the page of a restored tab the first time the pane shows it.
     load: { input: Schema.Struct({ binding, tabID: Browser.TabID }) },
     command: { input: Schema.Struct({ binding, command: Browser.Action }) },
+    find: { input: Schema.Struct({ binding, tabID: Browser.TabID, action: FindAction }) },
+    notice: { input: Schema.Struct({ binding, tabID: Browser.TabID, token: text(128), dismiss: Schema.Boolean }) },
+    // The user answers what the tab waits for; an answer to a prompt that already ended does nothing.
+    answer: { input: Schema.Struct({ binding, tabID: Browser.TabID, id: Schema.Int, answer: PromptAnswer }) },
     // Starts or stops the page's element picker; the page reports picks and exits as inspect events.
     inspect: { input: Schema.Struct({ binding, tabID: Browser.TabID, enabled: Schema.Boolean }) },
     // Highlights a picked element briefly, or clears any highlight when ref is omitted.
@@ -123,7 +245,9 @@ export const BrowserPane = Ipc.define({
     },
     // Deletes the cookies the page's address can read and its origin's stored data, then reloads the page.
     clearSite: { input: Schema.Struct({ binding, tabID: Browser.TabID }) },
+    reveal: { input: Schema.Struct({ binding, tabID: Browser.TabID }) },
     close: { input: Schema.Struct({ binding }) },
+    forget: { input: Schema.Struct({server:text(16_384),session:text(256).check(Schema.isStartingWith("ses"))}) },
   },
   events: {
     event: Schema.Struct({ binding: Schema.String, event: PaneEvent }),

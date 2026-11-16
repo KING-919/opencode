@@ -114,7 +114,7 @@ export interface Interface {
   /** Fails only when the rules deny the request; never asks the user. */
   readonly assertNotDenied: (input: AssertInput) => Effect.Effect<void, BlockedError | SessionErrors.NotFoundError>
   /** True only when the rules already allow the request; never asks the user. */
-  readonly allows: (input: AssertInput) => Effect.Effect<boolean, SessionErrors.NotFoundError>
+  readonly allows: (input: AssertInput, options?: { requireConfiguredAllow: boolean }) => Effect.Effect<boolean, SessionErrors.NotFoundError>
   readonly reply: (input: ReplyInput) => Effect.Effect<void, NotFoundError>
   readonly get: (id: ID) => Effect.Effect<Request | undefined>
   readonly forSession: (sessionID: SessionSchema.ID) => Effect.Effect<ReadonlyArray<Request>>
@@ -181,10 +181,14 @@ const layer = Layer.effect(
       return rules.filter((rule) => Wildcard.match(input.action, rule.action))
     }
 
-    const evaluateInput = Effect.fnUntraced(function* (input: AssertInput) {
+    const evaluateInput = Effect.fnUntraced(function* (input: AssertInput, requireConfiguredAllow = false) {
       const rules = yield* configured(input.sessionID, input.agent)
       if (denied(input, rules)) return { effect: "deny" as const, rules }
-      const all = [...rules, ...(yield* savedRules())]
+      // Passive reads on an agent-driven page must not consume an interactive tool's saved approval for an ask.
+      if (requireConfiguredAllow && input.resources.some(resource => evaluate(input.action, resource, rules).effect !== "allow"))
+        return { effect: "ask" as const, rules }
+      const saved = yield* savedRules()
+      const all = [...rules, ...saved]
       const effects = input.resources.map((resource) => evaluate(input.action, resource, all).effect)
       const effect: Permission.Effect = effects.includes("ask") ? "ask" : "allow"
       const event = yield* hooks.trigger("permission", "evaluate", {
@@ -195,6 +199,10 @@ const layer = Layer.effect(
         metadata: input.metadata,
         source: input.source,
         effect,
+        experimental: {
+          approved: input.resources.every((resource) => evaluate(input.action, resource, saved).effect === "allow"),
+          approvedSave: !!input.save?.length && input.save.every((key) => saved.some((rule) => rule.action === input.action && rule.resource === key)),
+        },
       })
       const unattended = yield* Unattended
       if (event.effect !== "ask" || unattended === undefined)
@@ -298,9 +306,9 @@ const layer = Layer.effect(
       })
     })
 
-    const allows = Effect.fn("Permission.allows")(function* (input: AssertInput) {
+    const allows = Effect.fn("Permission.allows")(function* (input: AssertInput, options?: { requireConfiguredAllow: boolean }) {
       if (closed) return false
-      return (yield* evaluateInput(input)).effect === "allow"
+      return (yield* evaluateInput(input, options?.requireConfiguredAllow)).effect === "allow"
     })
 
     const reply = Effect.fn("Permission.reply")((input: ReplyInput) =>

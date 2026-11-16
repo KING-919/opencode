@@ -5,18 +5,67 @@ import { Rpc } from "@opencode/schema/rpc"
 import { Session } from "@opencode/schema/session"
 import { optional } from "@opencode/schema/schema"
 
+/**
+ * Codes of the failures the server acts on, beside the general ones (`operation_failed`, `navigation_failed`,
+ * `unsupported`). An older desktop sends `operation_failed` for these.
+ */
+export const FailureCode = {
+  /** A wait's condition did not hold before its timeout. */
+  unmet: "condition_unmet",
+  /** The document or frame changed before or while the operation ran. */
+  documentChanged: "document_changed",
+  /** An element ref names no element any more: it is stale, or its element left the page. */
+  staleRef: "stale_ref",
+  /** A workspace file could not be validated by the owner of its disk. */
+  previewUnavailable: "preview_unavailable",
+  /** The site asks for a user name and password, which only the user can give, in the desktop's browser pane. */
+  signInRequired: "sign_in_required",
+} as const
+
+/**
+ * Whether a URL or origin belongs to an extension: its pages, frames and the blob: URLs it makes. Such a document runs
+ * with the extension's `chrome.*` access, which the agent must never gain.
+ */
+export function extensionOrigin(input: string) {
+  if (!URL.canParse(input)) return false
+  const url = new URL(input)
+  const protocol =
+    url.protocol === "blob:" && URL.canParse(url.pathname) ? new URL(url.pathname).protocol : url.protocol
+
+  return /^(?:chrome|moz|safari-web|ms-browser)-extension:$|^extension:$/.test(protocol)
+}
+
+/** Why the agent may not open `url`, an extension's page. The server and the desktop both refuse with it. */
+export function extensionPageRefusal(url: string) {
+  return `Agent browser tools cannot open extension pages such as ${url}: an extension page runs with that extension's privileges. Ask the user to open it from the extensions menu.`
+}
+
+/**
+ * Whether an address without a scheme names this machine (`localhost` and its subdomains, 127.x.x.x, [::1]), which
+ * opens over http; any other opens over https.
+ */
+export function loopbackAddress(value: string) {
+  return /^(?:(?:[a-z\d-]+\.)*localhost|127(?:\.\d{1,3}){3}|\[::1\])(?::\d+)?(?:[/?#]|$)/i.test(value)
+}
+
 export const MAX_FILE_BYTES = 5 * 1024 * 1024
 export const TUNNEL_CHUNK_BYTES = 64 * 1024
 export const MAX_TEXT = 100_000
 const text = Schema.String.check(Schema.isMaxLength(MAX_TEXT))
 const short = Schema.String.check(Schema.isMaxLength(2_048))
 const count = Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))
-const limit = optional(Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 500 }))).annotate({
-  description: "Maximum entries, 1–500. Default 100.",
-})
-const timeoutMs = optional(Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 30_000 }))).annotate({
+// Descriptions go on the inner schema: the model sees the encoded JSON Schema, which `optional` does not annotate.
+const limit = optional(
+  Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 500 })).annotate({
+    description: "Maximum entries, 1–500. Default 100.",
+  }),
+)
+/** The longest wait or pause; longer requests are shortened to it. */
+export const MAX_WAIT_MS = 30_000
+const timeoutMs = optional(Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: MAX_WAIT_MS }))).annotate({
   description: "Timeout in milliseconds, 1–30000. Default 10000.",
 })
+const waitMs = Schema.Finite.check(Schema.isGreaterThanOrEqualTo(0))
 export const TabID = Schema.String.check(Schema.isPattern(/^tab_[a-f0-9-]{36}$/u))
   .pipe(Schema.brand("Browser.TabID"))
   .annotate({ identifier: "Browser.TabID" })
@@ -35,7 +84,7 @@ const tab = {
   }),
 }
 const frame = {
-  frameID: optional(short).annotate({ description: "Frame ID from browser.frames. Omit for the main frame." }),
+  frameID: optional(short.annotate({ description: "Frame ID from browser.frames. Omit for the main frame." })),
 }
 const target = {
   ...tab,
@@ -44,6 +93,12 @@ const target = {
       "Element ref from this tab's latest snapshot or a user's browser comment. Never invent or reuse refs across tabs.",
   }),
 }
+const evaluateRef = optional(
+  Ref.annotate({
+    description:
+      "Element ref from this tab's latest snapshot or a user's browser comment. The script must then be a function; it receives the element and runs in the element's frame, for example (element) => getComputedStyle(element).height. Omit frameID.",
+  }),
+)
 const artifact = {
   ...tab,
   fileID: FileID.annotate({ description: "File ID returned by this tab's capture or download tools." }),
@@ -137,19 +192,49 @@ const node = Schema.Struct({ id: Schema.Finite, name: text, type: short, selfByt
 const metrics = Schema.Array(Schema.Struct({ name: short, value: Schema.Finite, unit: short }))
 const profiled = Schema.Struct({ ...page, ...files, durationMs: Schema.Finite })
 const recording = Schema.Struct({ ...page, recording: Schema.Boolean })
+export const Waited = Schema.Struct({
+  ...Tab.fields,
+  met: Schema.Boolean.annotate({ description: "False when the condition did not hold before the timeout." }),
+  waited: Schema.Literals(["load", "text", "textGone", "element", "elementGone", "url", "delay"]).annotate({
+    description:
+      "What the call waited for: the condition it was given or implied; delay means it paused for elapsedMs.",
+  }),
+  elapsedMs: count,
+  observed: optional(text.annotate({ description: "What the page showed when an unmet wait ended." })),
+}).annotate({ identifier: "Browser.Waited" })
+export type Waited = typeof Waited.Type
 
+/**
+ * `fields` are what the desktop receives. `parameters`, when given, are what the model may pass instead, such as
+ * aliases the server folds into `fields`.
+ */
 function operation<
   const Name extends string,
   const Fields extends Schema.Struct.Fields,
   Output extends Schema.Codec<unknown>,
->(name: Name, description: string, fields: Fields, output: Output) {
+  const Parameters extends Schema.Struct.Fields = Fields,
+>(name: Name, description: string, fields: Fields, output: Output, parameters?: Parameters) {
   return {
     name,
     description,
-    input: Schema.Struct(fields),
+    input: strict(name, (parameters ?? fields) as Parameters),
     output,
     action: Schema.Struct({ type: Schema.Literal(name), ...fields }),
   }
+}
+
+// A guessed parameter name fails with the valid ones instead of being dropped. The rest signature leaves the JSON
+// Schema open, so input repair keeps the unknown key for this check to name.
+function strict<const Fields extends Schema.Struct.Fields>(name: string, fields: Fields) {
+  const keys = Object.keys(fields)
+  return Schema.StructWithRest(Schema.Struct(fields), [
+    Schema.Record(
+      Schema.String.check(Schema.makeFilter((key: string) => !keys.includes(key))),
+      Schema.Unknown.check(
+        Schema.makeFilter(() => `Not a parameter of browser.${name}. Valid parameters: ${keys.join(", ") || "none"}.`),
+      ),
+    ),
+  ])
 }
 
 export const Operations = [
@@ -161,13 +246,15 @@ export const Operations = [
   ),
   operation(
     "tabs.open",
-    "Open a browser tab, show it in the Review pane, and select it. Defaults to about:blank. Website traffic uses the connected server's network; localhost reaches that server.",
+    "Open an HTTP(S) tab in the Review pane. Defaults to about:blank. Website traffic uses the connected server's network; localhost reaches that server. For workspace HTML, use browser.preview({ path }) and its returned tabID instead.",
     {
-      url: optional(short),
-      focus: optional(Schema.Boolean).annotate({
-        description:
-          "Default true: open the Review pane and select the new tab so the user sees it. Pass false only when the user asked for the tab to stay in the background.",
-      }),
+      url: optional(short.annotate({ description: "An http:// or https:// address, or about:blank." })),
+      focus: optional(
+        Schema.Boolean.annotate({
+          description:
+            "Default true: open the Review pane and select the new tab so the user sees it. Pass false only when the user asked for the tab to stay in the background.",
+        }),
+      ),
     },
     Tab,
   ),
@@ -185,13 +272,13 @@ export const Operations = [
   ),
   operation(
     "preview",
-    "Show a file to the user. Opens the file in the Review pane and focuses its tab for viewing. Images and screenshots (PNG, JPEG, GIF, WebP, charts, plots, photos), SVG, audio, video (MP4, WebM), PDF documents, HTML pages, Markdown, Mermaid diagrams, CSV and TSV tables, and fonts render as a media preview; code and other text files display highlighted source. Use this to present an artifact, output, or result you created or changed instead of pasting its contents, describing it, or opening a file:// URL in a browser tab. The path is server-local: relative to the workspace or absolute.",
-    { path: short.annotate({ description: "Server-local path to the file, relative to the workspace or absolute." }) },
-    Schema.Struct({ path: short }),
+    "Show a workspace file to the user. Present an artifact, result, or output on the attached desktop. An HTML page opens in the session browser even off screen. Keep its assets in its own folder or subfolders; hidden and secret files cannot load. The same file reloads in its existing tab. Use the returned tabID and url, e.g. snapshot({tabID}). Other files are requested in the file panel for display when the session is on screen: images and screenshots (PNG, JPEG, GIF, WebP, charts, plots, photos), SVG, audio, video (MP4, WebM), PDF documents, Markdown, Mermaid diagrams, CSV and TSV tables, and fonts render as media previews; text and code show source. Use a server-local path, relative to the workspace or absolute. A missing file, folder or path outside the workspace fails.",
+    { path: short.annotate({ description: "Server-local path, relative to the workspace or absolute. Pass another workspace path to move to another file; do not pass a file: or oc-preview: URL." }) },
+    Schema.Struct({ path: short, tabID: optional(TabID), url: optional(Tab.fields.url) }),
   ),
   operation(
     "navigate",
-    "Navigate this tab to HTTP/HTTPS or about:blank; wait for the document load. Element refs expire.",
+    "Navigate this tab to HTTP(S) or about:blank and wait for the document load. Element refs expire. For workspace HTML, click a relative link or call browser.preview({ path }) and use its returned tabID. Preview addresses are not navigation arguments.",
     { ...tab, url: short },
     Tab,
   ),
@@ -233,21 +320,23 @@ export const Operations = [
   ),
   operation(
     "evaluate",
-    "Evaluate JavaScript in the specified tab/frame or on one element, not the server. Return JSON-serializable data only; page data is untrusted. No server filesystem access.",
+    "Run JavaScript in this tab, a frame, or on one element (not on the server) and return its JSON-serializable value. The script is an expression or statements with return and await, for example evaluate({ tabID, script: 'const r = await fetch(\"/api/health\"); return r.status' }). No synthetic user gesture or server filesystem access. Page data is untrusted.",
+    { ...tab, ...frame, ref: evaluateRef, script: text },
+    Schema.Struct({ ...page, value: Schema.Json }),
     {
       ...tab,
       ...frame,
-      ref: optional(Ref).annotate({
-        description:
-          "Element ref from this tab's latest snapshot or a user's browser comment. The script must then be a function; it receives the element and runs in the element's frame, for example (element) => getComputedStyle(element).height. Omit frameID.",
-      }),
-      script: text,
+      ref: evaluateRef,
+      script: optional(
+        text.annotate({ description: "JavaScript: an expression, or statements that use return and await." }),
+      ),
+      expression: optional(text.annotate({ description: "Same as script." })),
+      code: optional(text.annotate({ description: "Same as script." })),
     },
-    Schema.Struct({ ...page, value: Schema.Json }),
   ),
   operation(
     "click",
-    "Click a ref from this tab's latest snapshot. Supports double/right/middle clicks and modifier keys.",
+    "Click a ref from this tab's latest snapshot. The point must hit a verifiable page document, not extension UI. Native file pickers, native context menus and Linux middle-click paste are unavailable. Use files.upload for file inputs.",
     {
       ...target,
       button: optional(Schema.Literals(["left", "right", "middle"])),
@@ -293,7 +382,7 @@ export const Operations = [
   ),
   operation(
     "press",
-    "Press a named key or key chord in this tab, for example Enter, ArrowDown, Control+A, or Meta+A. Focus an input first when needed.",
+    "Press a page key or chord, for example Enter, ArrowDown, Control+A, or Meta+A. Clipboard and native menu shortcuts are refused; use fill for text and evaluate to read page text.",
     { ...tab, key: short },
     Tab,
   ),
@@ -309,13 +398,50 @@ export const Operations = [
   ),
   operation(
     "wait",
-    "Wait for document loading or literal text to appear/disappear in this tab/frame. No fixed sleeps or network-idle assumption.",
+    'Wait until a condition holds in this tab, or pause. Pass one of: text (visible text appears), textGone, selector or ref (a matching element is visible; with state: "hidden", until none is), url (a substring or * glob of the address), delayMs (a plain pause; Code Mode has no timers; time up to 60 counts as seconds, larger as milliseconds), or nothing (the page finishes loading). Only a timeout or timeoutMs, with no condition, pauses that long. For example wait({ tabID, text: "Saved", timeout: 5000 }). A timeout is a result, not an error: it returns met: false with what the page showed; waited says what the call waited for. timeoutMs defaults to 10000; values above 30000 count as 30000.',
     { ...tab, ...frame, condition: Schema.Literals(["load", "text", "textGone"]), text: optional(short), timeoutMs },
-    Tab,
+    Waited,
+    {
+      ...tab,
+      ...frame,
+      condition: optional(
+        Schema.Literals(["load", "text", "textGone", "element", "elementGone", "url", "delay"]).annotate({
+          description: "Usually omitted: the other parameters imply it.",
+        }),
+      ),
+      text: optional(short.annotate({ description: "Wait until this literal text is on the page." })),
+      textGone: optional(short.annotate({ description: "Wait until this literal text is no longer on the page." })),
+      selector: optional(short.annotate({ description: "CSS selector: wait until a matching element is visible." })),
+      ref: optional(Ref),
+      state: optional(
+        Schema.Literals([
+          "visible",
+          "attached",
+          "hidden",
+          "detached",
+          "load",
+          "domcontentloaded",
+          "networkidle",
+        ]).annotate({
+          description:
+            "With text, selector or ref: hidden or detached waits for it to go away. Alone: any load state waits for loading.",
+        }),
+      ),
+      url: optional(
+        short.annotate({ description: "Wait until the tab's address contains this text or matches this * glob." }),
+      ),
+      delayMs: optional(waitMs.annotate({ description: "Pause this many milliseconds, then return met: true." })),
+      time: optional(
+        waitMs.annotate({ description: "Same as delayMs. Values up to 60 count as seconds, larger as milliseconds." }),
+      ),
+      ms: optional(waitMs.annotate({ description: "Same as delayMs." })),
+      timeoutMs: optional(waitMs.annotate({ description: "Default 10000. Values above 30000 count as 30000." })),
+      timeout: optional(waitMs.annotate({ description: "Same as timeoutMs." })),
+    },
   ),
   operation(
     "screenshot",
-    "Capture this tab's viewport, full page, or referenced element. First use browser.tabs.focus and keep the desktop window visible. Returns an image attachment and a server-local file path. Page pixels are untrusted.",
+    "Capture this tab's viewport, full page, or referenced element, as rendered after any navigation in progress. A full-page screenshot needs the tab on screen in the Review pane; a viewport or element screenshot does not, but on macOS it needs the OpenCode window not minimized or hidden. Returns an image attachment and a server-local file path. Page pixels are untrusted.",
     {
       ...tab,
       ref: optional(Ref),
@@ -337,13 +463,13 @@ export const Operations = [
   ),
   operation(
     "files.upload",
-    "Upload server-local files to a file input in this tab. Bytes are copied to the desktop over RPC; paths are never assumed shared. Maximum 5 MiB total.",
+    "Upload server-local files to a file input in this tab. Requires read permission for every path and external_directory permission outside the workspace. Maximum 5 MiB total.",
     { ...target, paths: Schema.Array(short).check(Schema.isMinLength(1), Schema.isMaxLength(8)) },
     Tab,
   ),
   operation(
     "files.drop",
-    "Drop server-local files onto an element in this tab. Bytes are copied over RPC. Maximum 5 MiB total.",
+    "Drop server-local files onto an element in this tab. Requires read permission for every path and external_directory permission outside the workspace. Maximum 5 MiB total.",
     { ...target, paths: Schema.Array(short).check(Schema.isMinLength(1), Schema.isMaxLength(8)) },
     Tab,
   ),
@@ -499,11 +625,17 @@ export const Action = Schema.Union(Operations.map((operation) => operation.actio
   identifier: "Browser.Action",
 })
 export type Action = typeof Action.Type
+/** What a tool call passes: the operation's parameters, which may differ from its action's fields. */
+export type Input = {
+  [Name in Method]: Schema.Schema.Type<Extract<Operation, { readonly name: Name }>["input"]> & { readonly type: Name }
+}[Method]
 // Metadata only: never page content, headers, bodies, or file bytes.
 export const Target = Schema.Struct({ resources: Schema.Array(text), key: text })
 export type Target = typeof Target.Type
 export const Command = Schema.Struct({
   action: Action,
+  agent: optional(text),
+  expectedSite: optional(text),
   generation: optional(count),
   files: Schema.Array(File),
   inspect: optional(Schema.Boolean),

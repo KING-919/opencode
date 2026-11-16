@@ -1,3 +1,4 @@
+import { FileVerificationError } from "@opencode/util/file-verification"
 import { batch, createRoot, createSignal, getOwner, onCleanup, untrack } from "solid-js"
 import { createStore, reconcile, unwrap } from "solid-js/store"
 import { makeEventListener } from "@solid-primitives/event-listener"
@@ -16,11 +17,20 @@ import {
 import { recordable, remember, withIcon } from "./history"
 import type definition from "./index"
 import { workspaceFileURL } from "./link"
-import { BrowserPane, type PaneEvent } from "./ipc"
+import { workspacePrefix } from "./remote-address"
+import {
+  BrowserPane,
+  type FindAction,
+  type FindView,
+  type PaneEvent,
+  type PromptAnswer,
+  type PromptView,
+  type RefusalNotice,
+} from "./ipc"
 import {
   addressFocusTab,
   createInitialState,
-  serverSupported,
+  sessionSupported,
   sessionAttached,
   sessionBrowser,
   sessionEmbed,
@@ -51,6 +61,10 @@ type ModelState = {
   machine: State
   /** Each session's page icons and zoom by tab, as this desktop reports them. */
   pages: Record<string, Record<string, PageDetail | undefined> | undefined>
+  chrome: Record<
+    string,
+    Record<string, { find?: FindView; notice?: RefusalNotice & { token: string }; prompt?: PromptView } | undefined> | undefined
+  >
 }
 
 /** A page's icon as a data URL, and its zoom factor, 1 at 100%. */
@@ -68,6 +82,8 @@ type PaneHandle = {
   inspect: () => void
   /** Focuses the address field and selects its text. */
   focusAddress: () => void
+  find: () => void
+  findMatch: (direction: "next" | "previous") => void
   /** Runs a key press the page handed to the app, as if it was pressed in this pane. */
   press: (event: ShortcutEvent) => void
   /** Marks the pane as holding the user's focus, which the page took outside the window's document. */
@@ -102,7 +118,7 @@ export function createModel(ctx: SetupContext<typeof definition>) {
 
   const owner = getOwner()
   const history = ctx.stores.history
-  const [state, setState] = createStore<ModelState>({ machine: createInitialState(untrack(ipc)), pages: {} })
+  const [state, setState] = createStore<ModelState>({ machine: createInitialState(untrack(ipc)), pages: {}, chrome: {} })
   const machine = () => state.machine
   const [panes, setPanes] = createSignal<readonly PaneHandle[]>([])
   // The I/O handles the machine's effects drive. They are never read as state.
@@ -110,7 +126,6 @@ export function createModel(ctx: SetupContext<typeof definition>) {
   const registrations = new Map<string, { attempt: number; registration: Registration }>()
   const registerTimers = new Map<string, ReturnType<typeof setTimeout>>()
   const retryTimers = new Map<string, ReturnType<typeof setTimeout>>()
-  const servers = new Map<string, () => void>()
   const listeners = new Map<string, (event: PaneEvent) => void>()
   const inspectors = new Map<string, Set<(event: InspectEvent) => void>>()
   // Each tab's last recorded page, so a state that repeats it does not write the history again.
@@ -124,6 +139,14 @@ export function createModel(ctx: SetupContext<typeof definition>) {
     if (error === "browser.address.credentials") return ctx.t("refused.credentials")
 
     if (error === "browser.address.workspace") return ctx.t("refused.workspace")
+
+    if (error === "browser.preview.restricted") return ctx.t("preview.restricted")
+
+    if (error === "browser.preview.agentRestricted") return ctx.t("preview.agentRestricted")
+
+    if (error === "browser.artifact.missing") return ctx.t("artifact.missing")
+
+    if (error === FileVerificationError.code) return ctx.t("preview.verificationUnavailable")
 
     if (error === "browser.address.web") return ctx.t("refused.web")
 
@@ -151,6 +174,7 @@ export function createModel(ctx: SetupContext<typeof definition>) {
 
       if (current?.attempt !== effect.attempt) return
       registrations.delete(effect.sessionKey)
+      setState("chrome", effect.sessionKey, undefined)
       current.registration.close()
 
       return
@@ -199,9 +223,11 @@ export function createModel(ctx: SetupContext<typeof definition>) {
 
     if (effect.type === "detach") return detach(effect.sessionKey)
 
-    if (effect.type === "watch-server") return watchServer(effect.serverID)
-    servers.get(effect.serverID)?.()
-    servers.delete(effect.serverID)
+    if (effect.type === "forget-tabs") {
+      const ref = drives.get(effect.sessionKey)?.ref
+
+      if (ref) void client()?.forget({server: ref.server.id, session:ref.id}).catch(() => undefined)
+    }
   }
 
   const schedule = (
@@ -264,8 +290,38 @@ export function createModel(ctx: SetupContext<typeof definition>) {
   const receive = (drive: Drive, attempt: number, event: PaneEvent) => {
     const sessionKey = drive.ref.key
 
-    if (event.type === "state")
+    // What the tab waits on the user for, kept per tab, so it shows again when the tab comes to front.
+    if (event.type === "prompt") {
+      // The strip closes a tab before main asks its page; one that asks to stay shows again, with "Leave site?".
+      if (event.prompt?.ask.kind === "leave" && layout.state(key(event.tabID), drive.ref) === "closed")
+        layout.open(key(event.tabID), drive.ref, { tab: "select" })
+
+      return setState("chrome", sessionKey, (old) => ({
+        ...old,
+        [event.tabID]: { ...old?.[event.tabID], prompt: event.prompt ?? undefined },
+      }))
+    }
+
+    if (event.type === "find" || event.type === "refusal") {
+      setState("chrome", sessionKey, (old) => ({ ...old, [event.tabID]: {
+        ...old?.[event.tabID], ...(event.type === "find" ? { find: event.view ?? undefined } : { notice: { ...event.notice, token: event.token } }),
+      } }))
+
+      return
+    }
+
+    if (event.type === "state") {
+      const open = event.state?.tabs
+      Object.keys(state.chrome[sessionKey] ?? {}).forEach((id) => {
+        const tab = open?.find((item) => item.id === id)
+
+        if (!tab) return setState("chrome", sessionKey, id, undefined)
+
+        if (tab.generation !== sessionTab(machine(), sessionKey, id)?.generation) setState("chrome", sessionKey, id, "notice", undefined)
+      })
+
       return dispatch({ type: "pane.state", sessionKey, attempt, state: event.state, error: event.error })
+    }
 
     if (event.type === "embed")
       return dispatch({ type: "pane.embed", sessionKey, attempt, tabID: event.tabID, embed: event.embed })
@@ -304,15 +360,19 @@ export function createModel(ctx: SetupContext<typeof definition>) {
 
     void current.registration.command(effect.action).then(
       () => dispatch({ type: "command.settled", sessionKey, request: effect.request }),
-      (cause: unknown) =>
+      (cause: unknown) => {
+        const error = cause instanceof Error && cause.message ? cause.message : "browser.command.failed"
+
+        if ((error === "browser.artifact.missing" || error === FileVerificationError.code) && !ctx.signal.aborted) ctx.toast.show({ title: describe(error), variant: "error" })
         dispatch({
           type: "command.failed",
           sessionKey,
           attempt: effect.attempt,
           request: effect.request,
-          error: cause instanceof Error && cause.message ? cause.message : "browser.command.failed",
+          error,
           unavailable: unavailable(cause),
-        }),
+        })
+      },
     )
   }
 
@@ -351,7 +411,7 @@ export function createModel(ctx: SetupContext<typeof definition>) {
       history.set({
         visits: remember(
           history.value.visits,
-          { url: tab.url, title: tab.title },
+          tab.url.startsWith("artifact:") ? { url: tab.url, title: tab.title, session: sessionKey } : { url: tab.url, title: tab.title },
           state.pages[sessionKey]?.[tab.id]?.icon,
         ),
       })
@@ -377,35 +437,7 @@ export function createModel(ctx: SetupContext<typeof definition>) {
       .filter((item) => item.startsWith(`${sessionKey}\n`))
       .forEach((item) => recorded.delete(item))
     setState("pages", sessionKey, undefined)
-  }
-
-  // A server whose plugin lacked the browser RPC may have it once its plugins finish loading, its event stream
-  // reconnects, or a restarted server replaces its controller. Leaving the list ends the watch too: its next session
-  // asks again.
-  const watchServer = (serverID: string) => {
-    servers.get(serverID)?.()
-    const changed = () => queueMicrotask(() => dispatch({ type: "server.changed", serverID }))
-    const find = () => sessions.list().find((ref) => ref.server.id === serverID)?.server
-    const marked = untrack(find)?.data
-
-    if (!marked) return changed()
-
-    servers.set(
-      serverID,
-      createRoot((dispose) => {
-        createKeyed(
-          () => find()?.data,
-          (data) => {
-            if (data !== marked) return changed()
-            onCleanup(data.on("server.connected", changed))
-            onCleanup(data.on("plugin.updated", changed))
-          },
-          { otherwise: changed },
-        )
-
-        return dispose
-      }, owner),
-    )
+    setState("chrome", sessionKey, undefined)
   }
 
   // The SDK removes the listener when the Ipc's generation ends.
@@ -431,7 +463,7 @@ export function createModel(ctx: SetupContext<typeof definition>) {
   const attach = (ref: SessionRef) => {
     const sessionKey = ref.key
 
-    if (drives.has(sessionKey) || !serverSupported(untrack(machine), ref.server.id)) return
+    if (drives.has(sessionKey)) return
     const drive: Drive = { ref, previews: [], dispose: () => undefined }
     drives.set(sessionKey, drive)
     dispatch({ type: "session.attached", sessionKey, serverID: ref.server.id, located: !!ref.location })
@@ -440,9 +472,21 @@ export function createModel(ctx: SetupContext<typeof definition>) {
     drive.dispose = createRoot((dispose) => {
       // A new session appears in the UI before its server-side creation finishes. The listeners follow the server's
       // live data: a re-authenticated server gets a new controller under the same ref.
+      let controller = ref.server.data
       createKeyed(
         () => ref.server.data,
         (data) => {
+          if (data !== controller) dispatch({type:"session.rebind", sessionKey})
+          controller = data
+          const changed = () => dispatch({type:"session.capability.changed", sessionKey})
+          onCleanup(data.on("plugin.updated", changed))
+          onCleanup(data.on("server.connected", changed))
+          onCleanup(data.on("session.deleted", event => {
+            if (event.data.sessionID === ref.id) dispatch({type:"session.removed", sessionKeys:[sessionKey]})
+          }))
+          onCleanup(data.on("session.moved", event => {
+            if (event.data.sessionID === ref.id) dispatch({type:"session.rebind", sessionKey})
+          }))
           onCleanup(
             data.on("session.created", (event) => {
               if (event.data.sessionID === ref.id) dispatch({ type: "session.created", sessionKey })
@@ -455,6 +499,10 @@ export function createModel(ctx: SetupContext<typeof definition>) {
           )
         },
       )
+
+      // The shell list is a view, not a deletion log. It can disappear during re-authentication or a refresh.
+      createKeyed(() => sessions.list().some(item => item.key === sessionKey && item.server.compatible) ? "listed" : "absent",
+        value => dispatch({ type:"session.presence", sessionKey, listed:value === "listed" }))
 
       // The server finished creating the session.
       createKeyed(
@@ -486,27 +534,9 @@ export function createModel(ctx: SetupContext<typeof definition>) {
     if (!view?.id) return
     const ref = sessions.list().find((item) => item.key === view.key)
 
-    return ref?.server.compatible && serverSupported(machine(), ref.server.id) ? ref : undefined
+    return ref?.server.compatible ? ref : undefined
   }, attach)
 
-  // An attachment closes with its shell tab, or when its server stops being compatible.
-  createKeyed(
-    () => {
-      const current = machine()
-
-      if (current.status !== "open") return
-      const owned = new Set(sessions.list().map((ref) => ref.key))
-
-      const stale = Object.keys(current.sessions).filter((id) => {
-        const drive = drives.get(id)
-
-        return !!drive && !(owned.has(id) && drive.ref.server.compatible)
-      })
-
-      return stale.length > 0 ? stale : undefined
-    },
-    (stale) => dispatch({ type: "session.removed", sessionKeys: stale }),
-  )
   onCleanup(() => {
     dispatch({ type: "disposed" })
     recorded.clear()
@@ -530,7 +560,7 @@ export function createModel(ctx: SetupContext<typeof definition>) {
   const attached = (session: Session) => sessionAttached(machine(), session.key)
 
   const available = (session: SessionRef) =>
-    serverSupported(machine(), session.server.id) && !!session.id && session.server.compatible && !layout.narrow()
+    sessionSupported(machine(), session.key) && !!session.id && session.server.compatible && !layout.narrow()
 
   const tab = (session: Session, tabID: string) => sessionTab(machine(), session.key, tabID)
 
@@ -548,10 +578,9 @@ export function createModel(ctx: SetupContext<typeof definition>) {
     return screen && sessions.current()?.key === session.key ? screen.file : undefined
   }
 
-  // The desktop's own sidecar shares this disk, and its browser pane accepts file:// URLs inside the
-  // session workspace only. Forwarded loopback servers do not qualify, matching the desktop policy.
+  // Both kinds of binding can open workspace files. Only the disk owner interprets their paths.
   const canOpen = (session: SessionRef, path?: string) => {
-    if (!session.server.builtin || !available(session) || !attached(session)) return false
+    if (!available(session) || !attached(session)) return false
 
     if (path === undefined) return true
     const current = files(session)
@@ -559,14 +588,13 @@ export function createModel(ctx: SetupContext<typeof definition>) {
     return !!current && !current.absolute(path)
   }
 
-  const openFile = (session: Session, path: string) => {
+  const openFile = (session: SessionRef, path: string) => {
     const current = files(session)
 
-    if (current) openURL(session, workspaceFileURL(current, path))
+    if (current) openURL(session, workspaceFileURL(current.root, path, session.server.builtin ? undefined : session.id))
   }
 
-  // The agent's browser.preview tool: the file plugin opens HTML in the browser, other files in the file panel. Only the
-  // session's screen resolves workspace paths, so a preview for a session that is not on screen waits for it.
+  // Main handles browser documents itself. File panel requests wait for the session's file model.
   const preview = (drive: Drive, path: string) => {
     const view = sessions.current()
 
@@ -601,6 +629,41 @@ export function createModel(ctx: SetupContext<typeof definition>) {
     },
     /** A page's icon and zoom, once this desktop reported them. */
     page: (session: Session, tabID: string) => state.pages[session.key]?.[tabID],
+    search: (session: Session, tabID: string) => state.chrome[session.key]?.[tabID]?.find,
+    notice(session: Session, tabID: string) {
+      const notice = state.chrome[session.key]?.[tabID]?.notice
+
+      if (!notice) return
+
+      if (notice.reason === "external" || notice.reason === "popup") return {
+        token: notice.token,
+        text: ctx.t(notice.reason === "external" ? "refused.external" : "refused.popup"), target: notice.target,
+        label: notice.action && ctx.t(notice.action === "copy" ? "link.copy" : "refused.open"),
+      }
+
+      return { token: notice.token, text: describe(notice.reason) }
+    },
+    async answerNotice(session: Session, tabID: Browser.TabID, dismiss: boolean) {
+      const token = state.chrome[session.key]?.[tabID]?.notice?.token
+
+      if (!token) return
+      setState("chrome", session.key, tabID, "notice", undefined)
+      const target = registration(session)
+
+      if (!target) throw new Error("browser.pane.unavailable")
+      await target.notice(tabID, token, dismiss)
+    },
+    /** What the tab waits on the user for. */
+    prompt: (session: Session, tabID: string) => state.chrome[session.key]?.[tabID]?.prompt,
+    /** A tab behind another one waits on the user, which its strip tab shows. */
+    asking: (session: Session, tabID: string) =>
+      !!state.chrome[session.key]?.[tabID]?.prompt && sessionBrowser(machine(), session.key)?.focusedTabID !== tabID,
+    answer(session: Session, tabID: Browser.TabID, id: number, answer: PromptAnswer) {
+      return registration(session)?.answer(tabID, id, answer) ?? Promise.reject(new Error("browser.pane.unavailable"))
+    },
+    find(session: Session, tabID: Browser.TabID, action: FindAction) {
+      return registration(session)?.find(tabID, action) ?? Promise.reject(new Error("browser.pane.unavailable"))
+    },
     zoom(session: Session, tabID: Browser.TabID, zoom: Zoom) {
       registration(session)?.zoom(tabID, zoom)
     },
@@ -608,8 +671,17 @@ export function createModel(ctx: SetupContext<typeof definition>) {
     site: (session: Session, tabID: Browser.TabID) => registration(session)?.site(tabID),
     /** Deletes the page's cookies and stored data, and reloads it. */
     clearSite: (session: Session, tabID: Browser.TabID) => registration(session)?.clearSite(tabID),
+    revealFile: (session: Session, tabID: Browser.TabID) => registration(session)?.reveal(tabID),
     /** Pages the browser showed, newest first. */
-    visits: () => history.value.visits,
+    visits: () => history.value.visits.filter((visit) => {
+      const session = sessions.current()
+
+      if (visit.url.startsWith("file:")) return session?.server.builtin
+
+      if (visit.session) return visit.session === session?.key
+
+      return !visit.url.startsWith("workspace:") || (!!session?.id && visit.url.startsWith(workspacePrefix(session.id)))
+    }),
     clearHistory: () => {
       recorded.clear()
       history.set({ visits: [] })

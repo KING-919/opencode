@@ -51,7 +51,7 @@ import browserEn from "./i18n/en"
 import type definition from "./index"
 import { createModel } from "./model"
 import SessionBrowserPane from "./panel"
-import { BrowserPane, type PaneEvent } from "./ipc"
+import { BrowserPane, type PaneEvent, type PromptAnswer } from "./ipc"
 import { pageShortcut } from "./keys"
 import { normalizeURL, refusal } from "./policy"
 import { type BuiltinLayout } from "@opencode/plugin/gui/builtin"
@@ -73,6 +73,8 @@ type PaneHost = {
 
 type PaneFixtureState = {
   session: string
+  /** The user's answers to the tab's prompts, as main receives them. */
+  answers: PromptAnswer[]
   mounted: boolean
   visible: boolean
   url: string | undefined
@@ -179,6 +181,7 @@ export function browserPaneFixture(input: PaneHost | StoryHost) {
 
     const [store, setStore] = createStore<PaneFixtureState>({
       session: "Alpha",
+      answers: [],
       mounted: true,
       visible: true,
       url: scenario === "Empty" || scenario === "Recent" ? "about:blank" : undefined,
@@ -296,7 +299,7 @@ export function browserPaneFixture(input: PaneHost | StoryHost) {
       embeds,
       t,
       // English plural forms, as the host picks them.
-      plural: (key: string, count: number) => t(`${key}.${count === 1 ? "one" : "other"}`, { count }),
+      plural: (key: string, count: number, params?: Parameters<typeof t>[1]) => t(`${key}.${count === 1 ? "one" : "other"}`, { ...params, count }),
     }
 
     const panel: PanelFrame = {
@@ -470,12 +473,27 @@ export function browserPaneFixture(input: PaneHost | StoryHost) {
 
         return { cookies: store.cookies }
       },
+      find: async (value) => {
+        const action = value.action
+        const query = action.type === "query" ? action.query : model.search({ key: store.session }, value.tabID)?.query ?? ""
+        emit(store.session, { type: "find", tabID: value.tabID, view: action.type === "close" ? null : {
+          query, result: query ? { active: action.type === "next" ? 2 : 1, total: 3 } : null,
+        } })
+      },
+      notice: async () => undefined,
+      // Main answers the page, which then waits on nothing.
+      answer: async (value) => {
+        setStore("answers", (answers) => [...answers, value.answer])
+        emit(store.session, { type: "prompt", tabID: value.tabID, prompt: null })
+      },
+      reveal: async () => undefined,
       // Main deletes the site's data and reloads the page.
       clearSite: async () => {
         setStore({ cookies: 0, generation: store.generation + 1 })
         report()
       },
       close: async () => undefined,
+      forget: async () => undefined,
       state: () => undefined,
       on: (_name, listener) => {
         // SAFETY: the pane's Ipc has one event, whose payload is exactly this binding and PaneEvent.
@@ -509,6 +527,8 @@ export function browserPaneFixture(input: PaneHost | StoryHost) {
           },
           set: (next: History) => setStore("history", reconcile(next)),
         },
+        // Already welcomed: the pane's offer to import sign-ins needs main's profile, which this fixture has none of.
+        preferences: { value: { links: true, welcomed: true }, set() {} },
       },
       system: {
         copy: async () => undefined,
@@ -667,6 +687,7 @@ export function browserPaneFixture(input: PaneHost | StoryHost) {
               Page icon
             </button>
           </nav>
+
           <p>Captures: {store.captures}</p>
           <p>Zoom: {Math.round(store.zoom * 100)}</p>
           <p>Visits: {store.history.visits.map((visit) => visit.url).join(" ")}</p>
@@ -707,6 +728,155 @@ export function browserPaneFixture(input: PaneHost | StoryHost) {
             </For>
           </ul>
           <div data-testid="fixture-comment-metadata">{JSON.stringify(store.comments)}</div>
+          {/* Below the pane, so the pane keeps the place the geometry specs measure. */}
+          <nav>
+            <button
+              onClick={() =>
+                emit(store.session, {
+                  type: "prompt",
+                  tabID: current().id,
+                  prompt: {
+                    id: 1,
+                    waiting: 1,
+                    focus: true,
+                    asked: 1,
+                    page: false,
+                    ask: {
+                      kind: "dialog",
+                      dialog: "confirm",
+                      site: { kind: "web", host: "alpha.example", embedded: false },
+                      message: "Discard the draft?\nIt cannot be restored.",
+                      value: "",
+                      stop: true,
+                    },
+                  },
+                })
+              }
+            >
+              Page confirm
+            </button>
+            <button
+              onClick={() =>
+                emit(store.session, {
+                  type: "prompt",
+                  tabID: current().id,
+                  prompt: {
+                    id: 2,
+                    waiting: 0,
+                    focus: false,
+                    asked: 1,
+                    page: false,
+                    ask: {
+                      kind: "permission",
+                      site: { kind: "web", host: "alpha.example", embedded: false },
+                      permissions: ["notifications"],
+                      remember: "kept",
+                      agent: false,
+                      system: false,
+                    },
+                  },
+                })
+              }
+            >
+              Permission request
+            </button>
+            <button
+              onClick={() =>
+                emit(store.session, {
+                  type: "prompt",
+                  tabID: current().id,
+                  prompt: {
+                    id: 2,
+                    waiting: 0,
+                    focus: false,
+                    asked: 2,
+                    page: false,
+                    ask: {
+                      kind: "permission",
+                      site: { kind: "web", host: "alpha.example", embedded: false },
+                      permissions: ["notifications"],
+                      remember: "kept",
+                      agent: false,
+                      system: false,
+                    },
+                  },
+                })
+              }
+            >
+              Repeat permission request
+            </button>
+            {/* Where the keyboard is in the window outside the pane, as the chat composer. */}
+            <input aria-label="Composer stand-in" />
+            <button
+              onClick={() =>
+                emit(store.session, {
+                  type: "prompt",
+                  tabID: current().id,
+                  prompt: {
+                    id: 3,
+                    waiting: 0,
+                    focus: false,
+                    asked: 1,
+                    page: false,
+                    ask: {
+                      kind: "permission",
+                      site: { kind: "web", host: "alpha.example", embedded: false },
+                      permissions: ["microphone"],
+                      remember: "none",
+                      agent: true,
+                      system: false,
+                    },
+                  },
+                })
+              }
+            >
+              Agent permission request
+            </button>
+            <button
+              onClick={() =>
+                emit(store.session, {
+                  type: "prompt",
+                  tabID: current().id,
+                  prompt: {
+                    id: 4,
+                    waiting: 0,
+                    focus: true,
+                    asked: 1,
+                    page: false,
+                    ask: {
+                      kind: "dialog",
+                      dialog: "prompt",
+                      site: { kind: "web", host: "alpha.example", embedded: false },
+                      message: "Name the copy",
+                      value: "Draft",
+                      stop: false,
+                    },
+                  },
+                })
+              }
+            >
+              Page prompt
+            </button>
+            <button
+              onClick={() =>
+                emit(store.session, {
+                  type: "prompt",
+                  tabID: current().id,
+                  prompt: {
+                    id: 5,
+                    waiting: 0,
+                    focus: true,
+                    asked: 1,
+                    page: false,
+                    ask: { kind: "auth", host: "intranet.alpha.example", realm: "Staff area", failed: true },
+                  },
+                })
+              }
+            >
+              Sign-in request
+            </button>
+          </nav>
+          <p>Answers: {JSON.stringify(store.answers)}</p>
           <Show when={store.covered}>
             {/* Floating content portals into <body> like a menu or hover card over the page. */}
             <Portal mount={document.body}>
@@ -784,7 +954,7 @@ type RegionHost = {
       ipc: (token: Ipc) => PaneClient | undefined
     }>
   >
-  usePluginHost(): { ready(): boolean }
+  usePluginHost(): { ready(): boolean; links: { open(link: { href: string; exact: boolean; session: MountedSession }): void } }
   createRegion(input: {
     region: "side"
     view: Accessor<MountedSession>
@@ -842,6 +1012,8 @@ type RegionFixtureState = {
   sessions: number
   /** How many browser tabs the pane asked main to open. */
   opens: number
+  previewURL?: string
+  toast?: string
   /** How many page reloads the pane asked main for. */
   reloads: number
   reopens: number
@@ -1057,7 +1229,10 @@ export function mountBrowserRegion(input: RegionHost) {
       },
       load: async () => undefined,
       command: async (value) => {
-        if (value.command.type === "tabs.open") setStore("opens", (count) => count + 1)
+        if (value.command.type === "tabs.open") {
+          setStore("opens", (count) => count + 1)
+          setStore("previewURL", value.command.url)
+        }
 
         if (value.command.type === "reload") setStore("reloads", (count) => count + 1)
 
@@ -1088,7 +1263,12 @@ export function mountBrowserRegion(input: RegionHost) {
       zoom: async () => undefined,
       site: async () => ({ cookies: 0 }),
       clearSite: async () => undefined,
+      find: async () => undefined,
+      notice: async () => undefined,
+      answer: async () => undefined,
+      reveal: async () => undefined,
       close: async () => undefined,
+      forget: async () => undefined,
       state: () => undefined,
       on: (_name, listener) => {
         // SAFETY: the pane's Ipc has one event, so every listener takes that event's payload.
@@ -1112,7 +1292,11 @@ export function mountBrowserRegion(input: RegionHost) {
       system: () => ({ copy: async () => undefined, openExternal() {}, save: async () => false }),
       sessions: () => ({ list: () => refs, current: view }),
       screen: () => ({ current: () => screen }),
-      toast: () => ({ show: () => ({ dismiss() {} }) }),
+      toast: () => ({ show: (input: { title: string }) => {
+        setStore("toast", input.title)
+
+        return { dismiss() {} }
+      } }),
       tabs: () => ({ list: () => [], open() {}, focus() {}, move() {}, close() {} }),
       layout,
       storage,
@@ -1259,7 +1443,12 @@ export function mountBrowserRegion(input: RegionHost) {
     function Ready(props: ParentProps) {
       const plugins = input.usePluginHost()
 
-      return <Show when={plugins.ready()}>{props.children}</Show>
+      return <Show when={plugins.ready()}>
+        <button onClick={() => plugins.links.open({ href: "report.html", exact: true, session: view() })}>Open workspace HTML</button>
+        <output>{store.previewURL}</output>
+        <output>{store.toast}</output>
+        {props.children}
+      </Show>
     }
 
     return (

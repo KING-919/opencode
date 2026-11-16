@@ -1,3 +1,4 @@
+import { FileVerificationError } from "@opencode/util/file-verification"
 import { Popover } from "@kobalte/core/popover"
 import { Button } from "@opencode/ui/button"
 import { Icon, newIcons } from "@opencode/ui/icon"
@@ -12,7 +13,7 @@ import { showToast } from "@opencode/ui/toast"
 import { Tooltip } from "@opencode/ui/tooltip"
 import { createEventListener } from "@solid-primitives/event-listener"
 import { createResizeObserver } from "@solid-primitives/resize-observer"
-import { createMemo, createSignal, For, onCleanup, Show, untrack, type Accessor, type JSX } from "solid-js"
+import { createMemo, createSignal, For, Index, onCleanup, Show, untrack, type Accessor, type JSX } from "solid-js"
 import type { Browser } from "@opencode/plugin-browser/rpc"
 import {
   createKeyed,
@@ -22,7 +23,10 @@ import {
   type MountedSession,
   type SessionScreen,
 } from "@opencode/plugin/gui"
-import { addressParts, connection, loopback } from "./address"
+import { addressParts, connection, externalAction } from "./address"
+import { hostDisplay } from "./host-display"
+import { FileSource } from "../file/contract"
+import { remotePath, workspacePrefix } from "./remote-address"
 import {
   ADDRESS_HINT_MAX_LENGTH,
   addressSuggestions,
@@ -34,7 +38,10 @@ import {
   type AddressEvent,
 } from "./address-machine"
 import { commentNote, pageNote } from "./comment"
+import { Glyph } from "./choices"
 import { bare, highlight, type Visit } from "./history"
+import { SignInOffer } from "./import-prompt"
+import type definition from "./index"
 import type { Model } from "./model"
 import {
   capturesEscape,
@@ -47,6 +54,11 @@ import {
   type OverlayEvent,
 } from "./overlay-machine"
 import { PageIcon } from "./page-icon"
+import { FindBar } from "./find-bar"
+import { RefusalBar } from "./refusal-bar"
+import type { FindAction, PromptAnswer } from "./ipc"
+import { blocking, PromptBar, PromptDialog } from "./prompts"
+import { BrowserProfile, type ProfileExtension } from "./profile/ipc"
 import {
   initialSiteState,
   SITE_CLEAR_TIMEOUT_MS,
@@ -59,13 +71,16 @@ import {
 
 const RECENT = 5
 
+/** An element a component reads after render, such as a button a native view anchors to. */
+type ElementRef = { element?: HTMLElement }
+
 export default function SessionBrowserPane(props: {
   tab: Accessor<PanelTab>
   session: MountedSession
   screen: SessionScreen
   model: Model
 }) {
-  const plugin = usePlugin()
+  const plugin = usePlugin<typeof definition>()
   const keybinds = plugin.keybinds
   const desktop = plugin.desktop
   const embeds = plugin.embeds
@@ -75,8 +90,80 @@ export default function SessionBrowserPane(props: {
   const state = () => props.model.tab(props.session, props.tab().id)
   const address = () => (state()?.url === "about:blank" ? "" : (state()?.url ?? ""))
   const failed = () => !!state()?.loadError
-  const suspended = () => props.model.suspended(props.session)
+
+  const failureMessage = () => {
+    const error = state()?.loadError
+
+    if (error === "browser.restore.outside") return "restore.outside"
+
+    if (error === "browser.restore.refused") return "restore.refused"
+
+    if (error === "browser.artifact.missing") return "artifact.missing"
+
+    if (error === FileVerificationError.code) return "preview.verificationUnavailable"
+
+    if (error === "browser.preview.unsupported") return "preview.upgrade"
+
+    return /ERR_(?:CERT_|SSL_)/.test(error ?? "") ? "failed.tls" : "failed.description"
+  }
+
+  const serverFile = () => /^(workspace|artifact):/.test(address())
+  const offline = () => serverFile() && !props.session.server.connected
+  const suspended = () => offline() || props.model.suspended(props.session)
   const command = (action: Browser.Action) => props.model.command(props.session, action)
+  const profile = plugin.use(BrowserProfile)
+  const fileSource = plugin.use(FileSource)
+
+  const sourcePath = () => {
+    const url = address()
+
+    if (!url.startsWith("file:///")) {
+      const prefix = workspacePrefix(props.session.id ?? "")
+
+      return remotePath(url, prefix) ? url.slice(prefix.length).split(/[?#]/, 1)[0] : undefined
+    }
+
+    return url
+  }
+
+  const source = () => {
+    const provider = fileSource()
+    const path = sourcePath()
+
+    return provider.status === "active" && path ? () => provider.value.open(props.session, path) : undefined
+  }
+
+  // The pane offers to import sign-ins until the user imports or declines once, and keeps the offer's confirmation of
+  // an import until the user closes it.
+  const [confirming, setConfirming] = createSignal(false)
+  const offering = () => !plugin.stores.preferences.value.welcomed || confirming()
+
+  const extensions = () => {
+    const current = profile()
+
+    return current.status === "active" ? (current.value.state()?.extensions ?? []) : []
+  }
+
+  // The extensions button, which an extension's popup opens under.
+  const extensionsButton: ElementRef = {}
+
+  // An extension's button opens its popup or tells it of the click; one without a button opens its options page.
+  const chooseExtension = (extension: ProfileExtension) => {
+    const current = profile()
+    const rect = extensionsButton.element?.getBoundingClientRect()
+
+    const fallback = () => {
+      const page = extension.options ?? extension.popup
+
+      if (page) props.model.openURL(props.session, page)
+    }
+
+    if (current.status !== "active" || !rect) return fallback()
+    const anchor = { x: rect.x, y: rect.y, width: rect.width, height: rect.height }
+    void current.value.click({ id: extension.id, anchor }).then((handled) => {
+      if (!handled) fallback()
+    }, fallback)
+  }
 
   const page = () => {
     const tab = state()
@@ -119,7 +206,7 @@ export default function SessionBrowserPane(props: {
   const empty = () => !address() && !state()?.loading && !addressBar().navigating
   // The desktop page hides blank and loading documents itself; only hide here
   // while the pane shows its own empty or failed state over the embed.
-  const shown = () => visible() && !empty() && !failed()
+  const shown = () => visible() && !empty() && !failed() && !suspended()
 
   const embed = () => {
     const tab = state()
@@ -131,8 +218,54 @@ export default function SessionBrowserPane(props: {
   let box: HTMLDivElement | undefined
   let input: HTMLInputElement | undefined
   let anchor: HTMLFormElement | undefined
+  let findInput: HTMLInputElement | undefined
+
+  const find = (action: FindAction) => {
+    const tab = state()
+
+    // Nothing to search while a dialog blocks the page; the bar would also sit beside the dialog's focus trap.
+    if (!tab || (action.type !== "close" && promptKey(true))) return
+
+    if (action.type === "open" && findInput?.isConnected) {
+      findInput.focus()
+      findInput.select()
+
+      return
+    }
+
+    void props.model.find(props.session, tab.id, action).catch(() => showToast({ title: plugin.t("common.requestFailed") }))
+  }
 
   const error = () => props.model.error(props.session)
+
+  // What the tab on screen waits on the user for: a bar above a page that keeps working, or a dialog over the still of
+  // a page it blocks. Each prompt mounts afresh, so its fields start from its own values.
+  const prompt = () => {
+    const tab = state()
+
+    return tab && !suspended() ? props.model.prompt(props.session, tab.id) : undefined
+  }
+
+  const promptKey = (modal: boolean) => {
+    const current = prompt()
+
+    return current && blocking(current) === modal ? `${current.ask.kind}:${current.id}` : undefined
+  }
+
+  const drawn = () => shown() && prompt()?.ask.kind !== "dialog"
+
+  // Focus moves to a prompt only when the user was in the pane or its page, never from the composer.
+  const promptFocus = () => !!prompt()?.focus || !!root?.contains(document.activeElement)
+
+  const answer = (value: PromptAnswer) => {
+    const tab = state()
+    const current = prompt()
+
+    if (!tab || !current) return
+    void props.model
+      .answer(props.session, tab.id, current.id, value)
+      .catch(() => showToast({ title: plugin.t("common.requestFailed") }))
+  }
 
   const inspectable = () => !!address() && !failed() && !suspended()
   const overlayed = createMemo(() => overlayView(overlay(), props.session.key, state()?.id))
@@ -191,21 +324,25 @@ export default function SessionBrowserPane(props: {
   }
 
   // The address field always shows the whole URL; at rest it draws the host emphasized.
-  const parts = () => addressParts(addressBar().field)
+  const webParts = createMemo(() => hostDisplay(addressBar().field))
+  const parts = () => webParts() ?? addressParts(addressBar().field)
   const site = () => !!addressBar().field && !addressBar().editing
   const recent = () => props.model.visits().slice(0, RECENT)
 
   // A loopback address opens on the machine that runs the server; the system browser here reaches it only when the
   // server runs here too.
-  const reachable = () => {
-    const url = address()
+  const reachable = () => externalAction(address(), props.session.server.local)
 
-    if (!URL.canParse(url)) return false
-    const parsed = new URL(url)
+  const externalLabel = () => address().startsWith("file:") ? "external.reveal" : "external.open"
 
-    if (parsed.protocol === "file:") return props.session.server.local
+  const openExternal = () => {
+    const tab = state()
 
-    return /^https?:$/.test(parsed.protocol) && (props.session.server.local || !loopback(parsed.hostname))
+    if (!tab || !reachable()) return
+
+    if (externalAction(tab.url, props.session.server.local) === "reveal") return props.model.revealFile(props.session, tab.id)
+
+    if (externalAction(tab.url, props.session.server.local) === "browser") system.openExternal(tab.url)
   }
 
   const closeOverlay = () => dispatchOverlay({ type: "overlay.cancelled" })
@@ -219,6 +356,15 @@ export default function SessionBrowserPane(props: {
   // Navigates the tab and keeps the address in the field until the page reports where it went. Ends editing here rather
   // than on blur: a click elsewhere, such as a recent page, may have blurred the field already.
   const go = (url: string) => dispatchAddress({ type: "navigated", url, epoch: epoch() })
+
+  // Cookies came in: the offer stays to say so, and the page loads again with them, so a signed-out site opens signed
+  // in.
+  const imported = () => {
+    const tab = state()
+    setConfirming(true)
+
+    if (tab && address()) command({ type: "reload", tabID: tab.id })
+  }
 
   const submitOverlay = (value: string) => dispatchOverlay({ type: "overlay.submitted", value, context: context() })
   const openNote = () => dispatchOverlay({ type: "note.opened", context: context() })
@@ -297,6 +443,8 @@ export default function SessionBrowserPane(props: {
       inspectable,
       inspect: toggleInspect,
       focusAddress,
+      find: () => find({ type: "open" }),
+      findMatch: (type) => find({ type }),
       // Dispatched inside the pane, so keybinds scoped to it, such as closing the browser tab, apply.
       press: (event) => {
         if (!visible()) return
@@ -559,10 +707,10 @@ export default function SessionBrowserPane(props: {
                   input shows its own text so selection and the caret need no mirror. */}
               <Show when={!addressBar().editing && addressBar().field}>
                 <div aria-hidden="true" data-slot="browser-address-display">
-                  <span data-slot="browser-address-url" data-host={parts().host ? "" : undefined}>
-                    <span data-slot="browser-address-muted">{parts().scheme}</span>
-                    <span data-slot="browser-address-host">{parts().host}</span>
-                    {parts().rest}
+                  <span data-slot="browser-address-url" data-host={parts().host ? "" : undefined} data-web={webParts() ? "" : undefined} dir="ltr">
+                    <span data-slot="browser-address-authority"><span data-slot="browser-address-muted">{parts().scheme}</span>
+                    <span data-slot="browser-address-host" title={parts().host}><bdi dir="ltr">{parts().host}</bdi></span></span>
+                    <span data-slot="browser-address-rest">{parts().rest}</span>
                   </span>
                 </div>
               </Show>
@@ -608,18 +756,20 @@ export default function SessionBrowserPane(props: {
                     icon={<Icon name="outline-globe-plus" />}
                   />
                 </Tooltip>
-                <Tooltip placement="top" value={plugin.t(reachable() ? "external.open" : "external.unavailable")}>
+                <Show when={!serverFile()}>
+                <Tooltip placement="top" value={plugin.t(reachable() ? externalLabel() : "external.unavailable")}>
                   <IconButton
                     type="button"
                     variant="ghost-muted"
                     size="small"
-                    aria-label={plugin.t("external.open")}
+                    aria-label={plugin.t(externalLabel())}
                     disabled={!reachable()}
                     onPointerDown={(event) => event.preventDefault()}
-                    onClick={() => system.openExternal(address())}
+                    onClick={openExternal}
                     icon={<Icon name={newIcons() ? "outline-square-arrow" : "outline-arrow-up-right"} />}
                   />
                 </Tooltip>
+                </Show>
               </div>
             </Show>
           </form>
@@ -660,6 +810,61 @@ export default function SessionBrowserPane(props: {
               icon={<Icon name="outline-browser-annotate" />}
             />
           </Tooltip>
+          {/* Extensions load into the profile, where pages of a server on this computer browse. */}
+          <Show when={props.session.server.local && extensions().length > 0}>
+            <Menu gutter={4} modal={false} placement="bottom-end">
+              <Tooltip placement="top" value={plugin.t("extensions.menu")}>
+                <Menu.Trigger
+                  as={IconButton}
+                  ref={(element: HTMLElement) => {
+                    extensionsButton.element = element
+                  }}
+                  variant="ghost-muted"
+                  size="large"
+                  data-action="browser-extensions"
+                  icon={<Icon name="extensions" />}
+                  aria-label={plugin.t("extensions.menu")}
+                />
+              </Tooltip>
+              <Menu.Portal>
+                <Menu.Content class="w-[220px]">
+                  <Index each={extensions()}>
+                    {(extension) => (
+                      <Menu.Item
+                        disabled={
+                          !extension().enabled ||
+                          extension().action?.enabled === false ||
+                          !(extension().action ?? extension().popup ?? extension().options)
+                        }
+                        onSelect={() => chooseExtension(extension())}
+                      >
+                        <Glyph image={extension().action?.icon ?? extension().icon} fallback="extensions" class="!size-4" />
+                        <span class="min-w-0 flex-1 truncate">{extension().action?.title ?? extension().name}</span>
+                        <Show when={extension().action?.badge}>
+                          {(badge) => (
+                            <span
+                              class="shrink-0 rounded-[3px] px-1 text-[10px] font-[530] leading-[14px]"
+                              classList={{ "text-v2-text-text-muted": !extension().action?.badgeColor }}
+                              style={{
+                                "background-color": extension().action?.badgeColor,
+                                color: extension().action?.badgeColor ? (extension().action?.badgeTextColor ?? "#ffffff") : undefined,
+                              }}
+                            >
+                              {badge()}
+                            </span>
+                          )}
+                        </Show>
+                      </Menu.Item>
+                    )}
+                  </Index>
+                  <Menu.Separator />
+                  <Menu.Item onSelect={() => plugin.layout.settings("browser")}>
+                    {plugin.t("extensions.manage")}
+                  </Menu.Item>
+                </Menu.Content>
+              </Menu.Portal>
+            </Menu>
+          </Show>
           <Menu gutter={4} modal={false} placement="bottom-end">
             <Tooltip placement="top" value={plugin.t("options")}>
               <Menu.Trigger
@@ -698,9 +903,17 @@ export default function SessionBrowserPane(props: {
                 <Menu.Item disabled={!address()} onSelect={copyLink}>
                   {plugin.t("link.copy")}
                 </Menu.Item>
-                <Menu.Item disabled={!reachable()} onSelect={() => system.openExternal(address())}>
-                  {plugin.t("external.menu")}
+                <Menu.Item disabled={!inspectable()} onSelect={() => find({ type: "open" })}>{plugin.t("find.open")}</Menu.Item>
+                <Show when={source()}>
+                  {(open) => <Menu.Item onSelect={() => open()()}>{plugin.t("preview.source")}</Menu.Item>}
+                </Show>
+                <Show when={!serverFile()}>
+                <Menu.Item disabled={!reachable()} onSelect={openExternal}>
+                  {plugin.t(address().startsWith("file:") ? "external.reveal" : "external.menu")}
                 </Menu.Item>
+                </Show>
+                <Menu.Separator />
+                <Menu.Item onSelect={() => plugin.layout.settings("browser")}>{plugin.t("settings.open")}</Menu.Item>
                 <Menu.Separator />
                 <Menu.Item disabled={props.model.visits().length === 0} onSelect={() => props.model.clearHistory()}>
                   {plugin.t("history.clear")}
@@ -710,7 +923,7 @@ export default function SessionBrowserPane(props: {
           </Menu>
         </div>
       </div>
-      <Show when={error() && !failed()}>
+      <Show when={error()}>
         <div
           class="shrink-0 px-3 py-1.5 text-12-regular text-v2-state-fg-danger border-b border-v2-border-border-muted"
           role="alert"
@@ -719,18 +932,60 @@ export default function SessionBrowserPane(props: {
           {error()}
         </div>
       </Show>
+      {/*
+        The bars above the page, always in this order: the sign-in offer, the site's permission request, the tab's
+        notice, then find. A dialog that blocks the page sits over the page area alone, never over a bar; find, which
+        would search the page behind it, closes while it shows.
+      */}
+      {/* Above a page, where a signed-out site is the reason to import; the new tab page shows the offer as a card. */}
+      <Show when={offering() && !empty() && !suspended()}>
+        <SignInOffer variant="bar" imported={imported} closed={() => setConfirming(false)} />
+      </Show>
+      <Show when={promptKey(false)} keyed>
+        {(key) => (
+          <Show when={key ? prompt() : undefined}>
+            {(view) => <PromptBar view={view()} answer={answer} focus={untrack(promptFocus)} />}
+          </Show>
+        )}
+      </Show>
+      <Show when={state()?.id} keyed>
+        {(id) => (
+          <>
+            <Show when={props.model.notice(props.session, id)}>
+              {(notice) => (
+                <RefusalBar notice={notice()} answer={(dismiss) => props.model.answerNotice(props.session, id, dismiss)} />
+              )}
+            </Show>
+            <Show when={!suspended() && !promptKey(true) && props.model.search(props.session, id)}>
+              {(view) => <FindBar view={view()} input={(el) => { findInput = el }} run={find} />}
+            </Show>
+          </>
+        )}
+      </Show>
       <embeds.View
         id={embed()}
-        visible={shown()}
-        frozen={overlayed().frozen}
+        // A page blocked in a JavaScript dialog draws no frame, so Chromium cannot capture a still of it: its dialog
+        // sits over the dimmed, empty page area at once. "Leave site?" and a sign-in leave the page drawing.
+        visible={drawn()}
+        frozen={overlayed().frozen || !!promptKey(true)}
         // A navigation, in-page or not, or a reload starting is another page.
         page={JSON.stringify([state()?.id, state()?.generation, state()?.url, !!state()?.loading])}
         radius={10}
         class="relative min-h-0 flex-1 bg-v2-background-bg-base flex items-center justify-center"
       >
         <div ref={box} aria-hidden="true" class="pointer-events-none absolute inset-0" />
+        <Show when={promptKey(true)} keyed>
+          {(key) => (
+            <Show when={key ? prompt() : undefined}>
+              {(view) => <PromptDialog view={view()} answer={answer} focus={untrack(promptFocus)} />}
+            </Show>
+          )}
+        </Show>
         <Show when={empty() && !failed() && !suspended()}>
-          <div dir="auto" class="size-full overflow-y-auto">
+          <div dir="auto" data-scrollable class="size-full overflow-y-auto">
+            <Show when={offering()}>
+              <SignInOffer variant="card" imported={imported} closed={() => setConfirming(false)} />
+            </Show>
             <Show
               when={recent().length > 0}
               fallback={
@@ -770,12 +1025,12 @@ export default function SessionBrowserPane(props: {
             <div class="text-[13px] font-medium leading-[var(--line-height-compact)] text-text-strong">
               {plugin.t("failed.title")}
             </div>
-            <div class="text-13-regular leading-[var(--line-height-base)]">{plugin.t("failed.description")}</div>
+            <div class="text-13-regular leading-[var(--line-height-base)]">{plugin.t(failureMessage())}</div>
           </div>
         </Show>
         <Show when={suspended()}>
           <p class="px-6 text-center text-13-regular text-v2-text-text-subtle" role="status">
-            {plugin.t("suspended")}
+            {plugin.t(offline() ? "preview.offline" : "suspended")}
           </p>
         </Show>
         <Show when={comment()}>
@@ -998,6 +1253,7 @@ const connections = {
   insecure: { icon: "outline-hexagonal-warning", title: "site.insecure", description: "site.insecure.description" },
   local: { icon: "monitor", title: "site.local", description: "site.local.description" },
   file: { icon: "folder", title: "site.file", description: "site.file.description" },
+  workspace: { icon: "folder", title: "preview.workspace", description: "site.file.description" },
 } as const
 
 /**
@@ -1071,7 +1327,7 @@ function SiteInformation(props: {
   const web = () => {
     const value = connection(props.url)
 
-    return !!value && value !== "file"
+    return !!value && value !== "file" && value !== "workspace"
   }
 
   const cookieDetail = () => {
