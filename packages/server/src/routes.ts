@@ -14,6 +14,7 @@ import { PermissionSaved } from "@opencode/core/permission/saved"
 import { PtyTicket } from "@opencode/core/pty/ticket"
 import { PersistentPty } from "@opencode/core/persistent-pty"
 import { Project } from "@opencode/core/project"
+import { VideoGeneration } from "@opencode/core/video-generation"
 import { Worktree } from "@opencode/core/worktree"
 import { Session } from "@opencode/core/session"
 import { Instance } from "@opencode/core/instance/service"
@@ -88,6 +89,8 @@ const applicationServiceNodes = [
   LocationActivity.node,
   SessionRestart.node,
   Schedule.node,
+  // Its polling fibers belong to the server, not to the request that started them.
+  VideoGeneration.node,
   Workspace.node,
   FileWatch.node,
 ] as const

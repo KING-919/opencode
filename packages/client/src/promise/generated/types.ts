@@ -178,7 +178,7 @@ export type SessionMessageToolStateRunning1 = {
   metadata: { [x: string]: JsonValue }
 }
 
-export type ModelType = "chat" | "decision" | "image" | (string & {})
+export type ModelType = "chat" | "decision" | "image" | "video" | (string & {})
 
 export type ModelReasoningField = "reasoning" | "reasoning_content" | "reasoning_text" | (string & {})
 
@@ -197,6 +197,10 @@ export type GenerateTextResponse = { data: { text: string } }
 export type GenerateUsage = { input?: number; output?: number }
 
 export type GenerateNative = { [x: string]: JsonValue }
+
+export type GenerateVideoID = string
+
+export type GenerateVideoErrorReason = "failed" | "cancelled" | "expired" | "unknown"
 
 export type GeneratePredicateAnswer = { type: "predicate"; name: string; probability: number }
 
@@ -730,6 +734,23 @@ export type ModelCost = {
   cache: { read: MoneyUSDPerMillionTokens; write: MoneyUSDPerMillionTokens }
 }
 
+export type GenerateVideoRunning = { id: GenerateVideoID; status: "running" }
+
+export type GenerateVideoCompleted = {
+  id: GenerateVideoID
+  status: "completed"
+  mime: string
+  bytes: number
+  expiresAt: number
+}
+
+export type GenerateVideoError = {
+  id: GenerateVideoID
+  status: "error"
+  error: string
+  reason: GenerateVideoErrorReason
+}
+
 export type GenerateChoiceAnswer = {
   type: "choice"
   name: string
@@ -982,6 +1003,16 @@ export type JobImage = {
   title?: string
   time: JobTime
   path: string
+  model: string
+}
+
+export type JobVideo = {
+  kind: "video"
+  id: string
+  sessionID: SessionID
+  status: JobStatus
+  title?: string
+  time: JobTime
   model: string
 }
 
@@ -2195,6 +2226,10 @@ export type SessionMessageToolStateError1 = {
   metadata?: { [x: string]: JsonValue }
 }
 
+export type GenerateVideoCreateResponse = { data: GenerateVideoRunning }
+
+export type GenerateVideoJob = GenerateVideoRunning | GenerateVideoCompleted | GenerateVideoError
+
 export type GenerateDecisionAnswer =
   | GeneratePredicateAnswer
   | GenerateChoiceAnswer
@@ -2273,7 +2308,7 @@ export type ScheduleWhen = ScheduleWhenIn | ScheduleWhenAt | ScheduleWhenEvery |
 
 export type ArtifactContent = { info: ArtifactInfo; files: { [x: string]: string } }
 
-export type JobInfo = JobShell | JobSubagent | JobImage
+export type JobInfo = JobShell | JobSubagent | JobImage | JobVideo
 
 export type SessionInboxMove = {
   id: SessionMessageID
@@ -2593,6 +2628,7 @@ export type ConfigEntry =
           media_blob?: boolean
           schedules?: boolean
           artifacts?: boolean
+          video_generate?: boolean
           console_watches?: boolean
           mcp_events?: boolean
           part_rows?: boolean
@@ -2669,6 +2705,8 @@ export type SessionMessageAssistantTool1 = {
     | SessionMessageToolStateError1
   time: { created: number; ran?: number; completed?: number }
 }
+
+export type GenerateVideoGetResponse = { data: GenerateVideoJob }
 
 export type GenerateDecisionResult = {
   answers: Array<GenerateDecisionAnswer>
@@ -3174,6 +3212,18 @@ export type ProviderRequestError = {
 export const isProviderRequestError = (value: unknown): value is ProviderRequestError =>
   typeof value === "object" && value !== null && "_tag" in value && value["_tag"] === "ProviderRequestError"
 
+export type ForbiddenError = { readonly _tag: "ForbiddenError"; readonly message: string }
+export const isForbiddenError = (value: unknown): value is ForbiddenError =>
+  typeof value === "object" && value !== null && "_tag" in value && value["_tag"] === "ForbiddenError"
+
+export type VideoNotFoundError = {
+  readonly _tag: "VideoNotFoundError"
+  readonly videoID: string
+  readonly message: string
+}
+export const isVideoNotFoundError = (value: unknown): value is VideoNotFoundError =>
+  typeof value === "object" && value !== null && "_tag" in value && value["_tag"] === "VideoNotFoundError"
+
 export type IntegrationNotFoundError = {
   readonly _tag: "IntegrationNotFoundError"
   readonly integrationID: string
@@ -3207,10 +3257,6 @@ export type McpServerNotFoundError = {
 }
 export const isMcpServerNotFoundError = (value: unknown): value is McpServerNotFoundError =>
   typeof value === "object" && value !== null && "_tag" in value && value["_tag"] === "McpServerNotFoundError"
-
-export type ForbiddenError = { readonly _tag: "ForbiddenError"; readonly message: string }
-export const isForbiddenError = (value: unknown): value is ForbiddenError =>
-  typeof value === "object" && value !== null && "_tag" in value && value["_tag"] === "ForbiddenError"
 
 export type ProjectNotFoundError = {
   readonly _tag: "ProjectNotFoundError"
@@ -3964,7 +4010,7 @@ export type MessageListOutput = SessionMessagesResponse
 
 export type ModelListInput = {
   readonly location?: { readonly directory?: string | undefined } | undefined
-  readonly types?: ReadonlyArray<"chat" | "decision" | "image" | (string & {})> | undefined
+  readonly types?: ReadonlyArray<"chat" | "decision" | "image" | "video" | (string & {})> | undefined
 }
 
 export type ModelListOutput = { location: LocationPublicRef; data: Array<ModelInfo> }
@@ -3990,6 +4036,31 @@ export type ExperimentalGenerateImageInput = {
 }
 
 export type ExperimentalGenerateImageOutput = GenerateImageResponse["data"]
+
+export type ExperimentalGenerateVideoCreateInput = {
+  readonly model: { readonly id: string; readonly providerID: string; readonly variant?: string }
+  readonly prompt: string
+  readonly start?: { readonly data: string; readonly mime: string; readonly name?: string } | undefined
+  readonly end?: { readonly data: string; readonly mime: string; readonly name?: string } | undefined
+  readonly references?:
+    | ReadonlyArray<{ readonly data: string; readonly mime: string; readonly name?: string }>
+    | undefined
+  readonly duration?: number | undefined
+  readonly aspect?: (`${number}${":"}${number}` | "auto") | undefined
+  readonly resolution?: ("480p" | "720p" | "1080p" | "4k" | (string & {})) | undefined
+  readonly sound?: boolean | undefined
+  readonly sessionID?: string | undefined
+}
+
+export type ExperimentalGenerateVideoCreateOutput = GenerateVideoCreateResponse["data"]
+
+export type ExperimentalGenerateVideoGetInput = { readonly id: string }
+
+export type ExperimentalGenerateVideoGetOutput = GenerateVideoGetResponse["data"]
+
+export type ExperimentalGenerateVideoContentInput = { readonly id: string }
+
+export type ExperimentalGenerateVideoContentOutput = globalThis.Uint8Array
 
 export type ExperimentalGenerateDecisionsInput = {
   readonly model: { readonly id: string; readonly providerID: string; readonly variant?: string }
@@ -4750,7 +4821,7 @@ export type ExperimentalArtifactsViewOutput = globalThis.Uint8Array
 
 export type ExperimentalJobListInput = {
   readonly sessionID?: string | undefined
-  readonly kind?: ("shell" | "subagent" | "image") | undefined
+  readonly kind?: ("shell" | "subagent" | "image" | "video") | undefined
   readonly status?: ("running" | "completed" | "error" | "cancelled") | undefined
   readonly descendants?: boolean | undefined
 }

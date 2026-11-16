@@ -1,10 +1,21 @@
 export * as Generate from "./generate.js"
 
-import { ai, AIError, DecisionClient, ImageClient, LLMClient, Media } from "@opencode/ai/effect"
+import {
+  ai,
+  AIError,
+  DecisionClient,
+  ImageClient,
+  LLMClient,
+  Media,
+  VideoClient,
+  type VideoAspectRatio,
+  type VideoModel,
+  type VideoStatus,
+} from "@opencode/ai/effect"
 import type { DecisionRequest, DecisionResult, ImageRequest, ImageResult } from "@opencode/schema/generate"
 import { Money } from "@opencode/schema/money"
 import { SessionID } from "@opencode/schema/session-id"
-import { Context, Effect, Layer, Schema } from "effect"
+import { Context, Effect, Layer, Schema, Stream } from "effect"
 import { RequestExecutor } from "@opencode/ai/route"
 import { makeLocationNode } from "@opencode/util/effect/app-node"
 import { llmClient, requestExecutor } from "./effect/app-node-platform.js"
@@ -16,6 +27,26 @@ import { ModelRetry } from "./model-retry.js"
 export interface TextInput {
   readonly prompt: string
   readonly model?: Model.Ref
+}
+
+export interface VideoInput {
+  readonly model: Model.Ref
+  readonly prompt: string
+  readonly start?: Media.ImageAsset
+  readonly end?: Media.ImageAsset
+  readonly references?: readonly Media.Asset[]
+  readonly duration?: number
+  readonly aspect?: VideoAspectRatio
+  readonly resolution?: string
+  readonly sound?: boolean
+}
+
+/** A finished video. `stream` downloads it as it is read, so a long video is never held in memory. */
+export interface VideoFile {
+  readonly mime: string
+  readonly width?: number
+  readonly height?: number
+  readonly stream: Stream.Stream<Uint8Array, Error>
 }
 
 export class UnavailableError extends Schema.TaggedError<UnavailableError>()("Generate.UnavailableError", {
@@ -74,6 +105,12 @@ export interface Interface {
   readonly text: (input: TextInput) => Effect.Effect<string, Error>
   readonly image: (input: ImageRequest) => Effect.Effect<ImageResult, Error>
   readonly decisions: (input: DecisionRequest) => Effect.Effect<DecisionResult, Error>
+  /** A video is a job: `start` submits it and returns the provider's job ID, which `status` and `result` read. */
+  readonly video: {
+    readonly start: (input: VideoInput) => Effect.Effect<{ readonly id: string }, Error>
+    readonly status: (model: Model.Ref, id: string) => Effect.Effect<VideoStatus, Error>
+    readonly result: (model: Model.Ref, id: string) => Effect.Effect<VideoFile, Error>
+  }
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/Generate") {}
@@ -88,6 +125,7 @@ export const layer = Layer.effect(
     const executor = yield* RequestExecutor.Service
     const images = yield* ImageClient.Service
     const decisionClient = yield* DecisionClient.Service
+    const videos = yield* VideoClient.Service
 
     const runText = Effect.fn("Generate.text")(function* (input: TextInput) {
       const resolved = yield* resolver.resolve(input.model).pipe(
@@ -129,7 +167,7 @@ export const layer = Layer.effect(
 
     // A ref no model of this type has: another type's model (422) or no model at all (404).
     const missing = Effect.fnUntraced(function* (ref: Model.Ref, type: Model.Type) {
-      const other = (yield* models.available(["chat", "image", "decision"])).find(
+      const other = (yield* models.available(["chat", "image", "video", "decision"])).find(
         (model) => model.providerID === ref.providerID && model.id === ref.id,
       )
       if (other)
@@ -214,6 +252,40 @@ export const layer = Layer.effect(
       } satisfies DecisionResult
     })
 
+    const video = Effect.fnUntraced(function* <A, R>(
+      ref: Model.Ref,
+      run: (model: VideoModel) => Effect.Effect<A, AIError, R>,
+    ) {
+      const model = yield* resolver
+        .resolveVideo(ref)
+        .pipe(Effect.mapError((error) => resolutionError(ref, "video", error)))
+      if (!model) return yield* missing(ref, "video")
+      return yield* run(model).pipe(
+        Effect.provideService(VideoClient.Service, videos),
+        Effect.mapError((error) => providerError(ref, error)),
+      )
+    })
+
+    const videoResult = Effect.fnUntraced(function* (ref: Model.Ref, id: string) {
+      const response = yield* video(ref, (model) => ai.video.result(model, id))
+      const file = response.video
+      if (!file)
+        return yield* new ProviderRequestError({
+          providerID: ref.providerID,
+          reason: "provider",
+          message: `${ref.providerID}/${ref.id} returned no video`,
+        })
+      return {
+        mime: file.mediaType,
+        width: file.info?.width,
+        height: file.info?.height,
+        stream: file.stream().pipe(
+          Stream.provideService(RequestExecutor.Service, executor),
+          Stream.mapError((error) => providerError(ref, error)),
+        ),
+      } satisfies VideoFile
+    })
+
     const credentials = <A, E, R>(effect: Effect.Effect<A, E | Integration.AuthorizationError, R>) =>
       effect.pipe(
         Effect.catchTag(
@@ -226,9 +298,24 @@ export const layer = Layer.effect(
       text: (input) => credentials(runText(input)),
       image: (input) => credentials(image(input)),
       decisions: (input) => credentials(decisions(input)),
+      video: {
+        // Submitting is paid and not idempotent, so it is never retried.
+        start: (input) =>
+          credentials(
+            video(input.model, (model) =>
+              ai.video.start({
+                ...input,
+                model,
+                duration: input.duration === undefined ? undefined : (`${input.duration} seconds` as const),
+              }),
+            ),
+          ),
+        status: (model, id) => credentials(video(model, (resolved) => ai.video.status(resolved, id))),
+        result: (model, id) => credentials(videoResult(model, id)),
+      },
     })
   }),
-).pipe(Layer.provide([ImageClient.layer, DecisionClient.layer]))
+).pipe(Layer.provide([ImageClient.layer, DecisionClient.layer, VideoClient.layer]))
 
 // Provider metadata may hold undefined fields, which the JSON response schema rejects.
 function plainJson(value: Record<string, unknown>): Record<string, unknown> {
