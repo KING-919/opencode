@@ -24,7 +24,7 @@ export interface Interface {
 export class Service extends Context.Service<Service, Interface>()("@opencode/Flag") {}
 
 /**
- * `OPENCODE_FLAGS`, a comma-separated list such as `schedules,-media_blob`; a leading `-` turns a flag off, and
+ * `OPENCODE_FLAGS`, a comma-separated list such as `automations,-media_blob`; a leading `-` turns a flag off, and
  * `all` turns every flag on unless the same list opts one out, as in `all,-media_blob`.
  */
 export const Overrides = Context.Reference<string | undefined>("@opencode/Flag/Overrides", {
@@ -59,9 +59,12 @@ export function resolve(input: {
     input.entries.findLast(
       (entry): entry is Document => entry.type === "document" && entry.info.experimental?.all_flags !== undefined,
     )?.info.experimental?.all_flags === true
+  const names = Object.keys(ConfigFlag.aliases) as Array<keyof typeof ConfigFlag.aliases>
   return Record.map(ConfigFlag.registry, (_, key): State => {
-    const override = env.get(key) ?? (all ? true : undefined)
-    const configured = experimental?.[key] ?? (allFlags ? true : undefined)
+    const old = names.find((name) => ConfigFlag.aliases[name] === key)
+    const override = env.get(key) ?? (old === undefined ? undefined : env.get(old)) ?? (all ? true : undefined)
+    const configured =
+      experimental?.[key] ?? (old === undefined ? undefined : experimental?.[old]) ?? (allFlags ? true : undefined)
     const [enabled, source]: [boolean, State["source"]] =
       override !== undefined
         ? [override, "env"]
